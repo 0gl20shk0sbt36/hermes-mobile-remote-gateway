@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
 import 'connections.dart';
+import 'l10n.dart';
 
 class AuthError implements Exception {
   AuthError(this.message);
@@ -112,17 +113,17 @@ class HermesApi {
           )
           .timeout(_timeout);
     } on TimeoutException {
-      throw AuthError('انتهت مهلة الاتصال بالخادم. تأكد من تشغيل Tailscale على الجوال.');
+      throw AuthError(L10n.t('انتهت مهلة الاتصال بالخادم. تأكد من تشغيل Tailscale على الجوال.'));
     } on SocketException {
-      throw AuthError('تعذر الوصول إلى الخادم. تأكد من العنوان ومن تشغيل Tailscale.');
+      throw AuthError(L10n.t('تعذر الوصول إلى الخادم. تأكد من العنوان ومن تشغيل Tailscale.'));
     }
-    if (r.statusCode == 401) throw AuthError('اسم المستخدم أو كلمة المرور غير صحيحة.');
-    if (r.statusCode == 429) throw AuthError('محاولات كثيرة. انتظر دقيقة ثم أعد المحاولة.');
-    if (r.statusCode != 200) throw AuthError('تعذر تسجيل الدخول (رمز ${r.statusCode}).');
+    if (r.statusCode == 401) throw AuthError(L10n.t('اسم المستخدم أو كلمة المرور غير صحيحة.'));
+    if (r.statusCode == 429) throw AuthError(L10n.t('محاولات كثيرة. انتظر دقيقة ثم أعد المحاولة.'));
+    if (r.statusCode != 200) throw AuthError(L10n.t('تعذر تسجيل الدخول (رمز {0}).', [r.statusCode]));
     final raw = r.headers['set-cookie'] ?? '';
     final re = RegExp(r'(hermes_session_\w+)=("[^"]*"|[^;,\s]*)');
     cookie = re.allMatches(raw).map((m) => '${m[1]}=${m[2]}').join('; ');
-    if (cookie.isEmpty) throw AuthError('لم يُرجع الخادم جلسة دخول.');
+    if (cookie.isEmpty) throw AuthError(L10n.t('لم يُرجع الخادم جلسة دخول.'));
     await _store.write(key: 'cookie', value: cookie);
   }
 
@@ -145,9 +146,9 @@ class HermesApi {
       await login();
       r = await get();
     }
-    if (r.statusCode == 404) throw 'الملف غير موجود على الخادم';
-    if (r.statusCode == 413) throw 'الملف أكبر من المسموح';
-    if (r.statusCode != 200) throw 'تعذر التنزيل (رمز ${r.statusCode})';
+    if (r.statusCode == 404) throw L10n.t('الملف غير موجود على الخادم');
+    if (r.statusCode == 413) throw L10n.t('الملف أكبر من المسموح');
+    if (r.statusCode != 200) throw L10n.t('تعذر التنزيل (رمز {0})', [r.statusCode]);
     return r.bodyBytes;
   }
 
@@ -167,14 +168,14 @@ class HermesApi {
       await login();
       r = await get();
     }
-    if (r.statusCode != 200) throw 'تعذر تحميل المحادثة (رمز ${r.statusCode})';
+    if (r.statusCode != 200) throw L10n.t('تعذر تحميل المحادثة (رمز {0})', [r.statusCode]);
     final body = jsonDecode(utf8.decode(r.bodyBytes));
     return [for (final m in (body['messages'] as List? ?? const [])) Map<String, dynamic>.from(m as Map)];
   }
 
   Future<String> ticket() async {
     final r = await _postAuthed('/api/auth/ws-ticket', {});
-    if (r.statusCode != 200) throw AuthError('تعذر الحصول على تذكرة الاتصال (${r.statusCode}).');
+    if (r.statusCode != 200) throw AuthError(L10n.t('تعذر الحصول على تذكرة الاتصال ({0}).', [r.statusCode]));
     return jsonDecode(r.body)['ticket'] as String;
   }
 
@@ -184,7 +185,7 @@ class HermesApi {
       'data_url': dataUrl,
       'mime_type': mime,
     }).timeout(const Duration(seconds: 90));
-    if (r.statusCode != 200) throw Exception('فشل التفريغ الصوتي (${r.statusCode})');
+    if (r.statusCode != 200) throw Exception(L10n.t('فشل التفريغ الصوتي ({0})', [r.statusCode]));
     return (jsonDecode(utf8.decode(r.bodyBytes))['transcript'] as String? ?? '').trim();
   }
 }
@@ -345,7 +346,7 @@ class Gateway extends ChangeNotifier {
     if (ws != null) _retireSocket(ws);
     _finishConnect();
     _rejectPending();
-    lastError = 'تعذر الاتصال بالخادم. تأكد من الشبكة ومن تشغيل Tailscale.';
+    lastError = L10n.t('تعذر الاتصال بالخادم. تأكد من الشبكة ومن تشغيل Tailscale.');
     if (state != LinkState.offline) {
       state = LinkState.offline;
       notifyListeners();
@@ -373,7 +374,7 @@ class Gateway extends ChangeNotifier {
       _pendingTimers.remove(id.toString())?.cancel();
       if (error is Map) {
         c.completeError(RpcError(
-            (error['code'] as num?)?.toInt() ?? 0, '${error['message'] ?? 'خطأ'}', error['data']));
+            (error['code'] as num?)?.toInt() ?? 0, '${error['message'] ?? L10n.t('خطأ')}', error['data']));
       } else {
         c.complete(msg['result']);
       }
@@ -396,27 +397,27 @@ class Gateway extends ChangeNotifier {
   Future<dynamic> call(String method, [Map<String, dynamic> params = const {}, Duration? timeout]) {
     final ws = _ws;
     if (_closed || state != LinkState.connected || ws == null) {
-      return Future.error(RpcError(-1, 'غير متصل بالخادم'));
+      return Future.error(RpcError(-1, L10n.t('غير متصل بالخادم')));
     }
     final id = 'm${++_n}';
     final String frame;
     try {
       frame = jsonEncode({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
     } catch (_) {
-      return Future.error(RpcError(-3, 'تعذر ترميز الطلب'));
+      return Future.error(RpcError(-3, L10n.t('تعذر ترميز الطلب')));
     }
     try {
       ws.add(frame);
     } catch (_) {
       if (identical(ws, _ws)) _onDone(_generation);
-      return Future.error(RpcError(-1, 'انقطع الاتصال'));
+      return Future.error(RpcError(-1, L10n.t('انقطع الاتصال')));
     }
     final c = Completer<dynamic>();
     _pending[id] = c;
     _pendingTimers[id] = Timer(timeout ?? const Duration(seconds: 90), () {
       _pendingTimers.remove(id);
       _pending.remove(id);
-      c.completeError(RpcError(-2, 'انتهت مهلة الطلب: $method'));
+      c.completeError(RpcError(-2, L10n.t('انتهت مهلة الطلب: {0}', [method])));
     });
     return c.future;
   }
@@ -427,7 +428,7 @@ class Gateway extends ChangeNotifier {
     }
     _pendingTimers.clear();
     for (final c in _pending.values) {
-      if (!c.isCompleted) c.completeError(RpcError(-1, 'انقطع الاتصال'));
+      if (!c.isCompleted) c.completeError(RpcError(-1, L10n.t('انقطع الاتصال')));
     }
     _pending.clear();
   }
