@@ -113,9 +113,9 @@ class HermesApi {
           )
           .timeout(_timeout);
     } on TimeoutException {
-      throw AuthError(L10n.t('انتهت مهلة الاتصال بالخادم. تأكد من تشغيل Tailscale على الجوال.'));
+      throw AuthError(L10n.t('انتهت مهلة الاتصال بالخادم. تأكد من الشبكة ومن الوصول إلى الخادم (Tailscale أو نفق عام).'));
     } on SocketException {
-      throw AuthError(L10n.t('تعذر الوصول إلى الخادم. تأكد من العنوان ومن تشغيل Tailscale.'));
+      throw AuthError(L10n.t('تعذر الوصول إلى الخادم. تأكد من العنوان ومن الشبكة.'));
     }
     if (r.statusCode == 401) throw AuthError(L10n.t('اسم المستخدم أو كلمة المرور غير صحيحة.'));
     if (r.statusCode == 429) throw AuthError(L10n.t('محاولات كثيرة. انتظر دقيقة ثم أعد المحاولة.'));
@@ -204,7 +204,25 @@ class Gateway extends ChangeNotifier {
   final events = StreamController<Map<String, dynamic>>.broadcast();
   final requests = StreamController<Map<String, dynamic>>.broadcast();
   LinkState state = LinkState.offline;
-  String? lastError;
+  // 错误文案不缓存译文（切语言后要跟着变）：存 key + 参数，渲染时现场翻译。
+  String? _errKey;
+  List<Object?> _errArgs = const [];
+  String? _errRaw;
+
+  String? get lastError =>
+      _errKey != null ? L10n.t(_errKey!, _errArgs.isEmpty ? null : _errArgs) : _errRaw;
+
+  set lastError(String? value) {
+    _errKey = null;
+    _errArgs = const [];
+    _errRaw = value;
+  }
+
+  void _error(String key, [List<Object?> args = const []]) {
+    _errKey = key;
+    _errArgs = args;
+    _errRaw = null;
+  }
   bool _closed = false;
   bool _disposed = false;
   int _retry = 0;
@@ -346,7 +364,7 @@ class Gateway extends ChangeNotifier {
     if (ws != null) _retireSocket(ws);
     _finishConnect();
     _rejectPending();
-    lastError = L10n.t('تعذر الاتصال بالخادم. تأكد من الشبكة ومن تشغيل Tailscale.');
+    _error('تعذر الاتصال بالخادم. تأكد من الشبكة ومن الوصول إلى الخادم (Tailscale أو نفق عام).');
     if (state != LinkState.offline) {
       state = LinkState.offline;
       notifyListeners();

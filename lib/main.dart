@@ -487,7 +487,7 @@ class _LoginPageState extends State<LoginPage> {
                     child: TextButton.icon(
                       onPressed: () => pickLanguage(context),
                       icon: ic(tb.Language.new, size: 15, color: D.muted),
-                      label: Text(L10n.names[L10n.lang]!, style: txt(12.5, color: D.muted)),
+                      label: Text('${L10n.t('اللغة')} · ${L10n.names[L10n.lang]}', style: txt(12.5, color: D.muted)),
                     ),
                   ),
                 ]),
@@ -597,7 +597,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     await showDDialog<void>(context, (c) => DDialog(
       title: L10n.t('الاتصال في الخلفية'),
       body: '${status['running'] == true ? L10n.t('خدمة الاتصال تعمل.') : L10n.t('خدمة الاتصال متوقفة.')} '
-          '${status['batteryExempt'] == true ? L10n.t('تحسين البطارية غير مفعّل لهذا التطبيق.') : L10n.t('للاستمرار عند إطفاء الشاشة، افتح إعدادات البطارية واختر Hermes ثم «عدم التحسين» أو «غير مقيّد». قد تحتاج الإعداد نفسه لـ Tailscale.')} '
+          '${status['batteryExempt'] == true ? L10n.t('تحسين البطارية غير مفعّل لهذا التطبيق.') : L10n.t('للاستمرار عند إطفاء الشاشة، افتح إعدادات البطارية واختر Hermes ثم «عدم التحسين» أو «غير مقيّد». قد تحتاج تطبيقات الشبكة (مثل Tailscale أو نفق عام) الإعداد نفسه.')} '
           '${L10n.t('الخدمة تستهلك بطارية إضافية. الإيقاف الإجباري من Android يوقفها.')}',
       actions: [
         DBtn(label: L10n.t('إعدادات البطارية'), kind: DBtnKind.outline,
@@ -2086,7 +2086,7 @@ class _ModelSheetState extends State<ModelSheet> {
         Row(children: [
           ic(tb.Brain.new, size: 17, color: D.accent),
           const SizedBox(width: 12),
-          Text('Thinking', textDirection: TextDirection.ltr, style: txt(14, weight: FontWeight.w500)),
+          Text(L10n.t('التفكير'), textDirection: dDirOf(L10n.t('التفكير')), style: txt(14, weight: FontWeight.w500)),
           const Spacer(),
           Text(_effortLabel(effort), textDirection: TextDirection.ltr, style: txt(12, color: D.faint)),
         ]),
@@ -2515,7 +2515,19 @@ class MediaCard extends StatefulWidget {
 class _MediaCardState extends State<MediaCard> {
   bool busy = false;
   List<int>? bytes;
-  String? error;
+  // 错误文案不缓存译文（切语言后要跟着变）：key + 参数，渲染时现场翻译；原样文本走 _errRaw。
+  String? _errKey;
+  List<Object?> _errArgs = const [];
+  String? _errRaw;
+
+  String? get error =>
+      _errKey != null ? L10n.t(_errKey!, _errArgs.isEmpty ? null : _errArgs) : _errRaw;
+
+  set error(String? value) {
+    _errKey = null;
+    _errArgs = const [];
+    _errRaw = value;
+  }
 
   String get name => widget.path.split('/').last;
   bool get isImage => _fileIcon(name) == tb.Photo.new;
@@ -2554,7 +2566,13 @@ class _MediaCardState extends State<MediaCard> {
     await f.parent.create(recursive: true);
     await f.writeAsBytes(b);
     final r = await OpenFilex.open(f.path);
-    if (r.type != ResultType.done && mounted) setState(() => error = L10n.t('لا يوجد تطبيق لفتح هذا الملف'));
+    if (r.type != ResultType.done && mounted) {
+      setState(() {
+        _errKey = 'لا يوجد تطبيق لفتح هذا الملف';
+        _errArgs = const [];
+        _errRaw = null;
+      });
+    }
   }
 
   @override
@@ -2702,7 +2720,19 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
   List<Conn> conns = [];
   String? activeId;
   String busyId = '';
-  String? error;
+  // 错误文案不缓存译文（切语言后要跟着变）：key + 参数，渲染时现场翻译；原样文本走 _errRaw。
+  String? _errKey;
+  List<Object?> _errArgs = const [];
+  String? _errRaw;
+
+  String? get error =>
+      _errKey != null ? L10n.t(_errKey!, _errArgs.isEmpty ? null : _errArgs) : _errRaw;
+
+  set error(String? value) {
+    _errKey = null;
+    _errArgs = const [];
+    _errRaw = value;
+  }
   bool loaded = false;
 
   @override
@@ -2738,7 +2768,10 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
       if (!mounted) return;
       setState(() {
         busyId = '';
-        error = L10n.t('تعذر الاتصال بـ «{0}»: {1}', [c.name.isEmpty ? Connections.defaultName(c.url) : c.name, e]);
+        // 不缓存译文：存 key+参数，渲染时按当前语言翻译
+        _errKey = 'تعذر الاتصال بـ «{0}»: {1}';
+        _errArgs = [c.name.isEmpty ? Connections.defaultName(c.url) : c.name, '$e'];
+        _errRaw = null;
       });
     }
   }

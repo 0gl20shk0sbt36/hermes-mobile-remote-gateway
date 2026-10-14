@@ -885,7 +885,7 @@ class DCodeBlock extends StatelessWidget {
                       child: Row(mainAxisSize: MainAxisSize.min, children: [
                         ic(tb.Copy.new, size: 14, color: D.muted),
                         const SizedBox(width: 5),
-                        Text('Copy', style: txt(11.5, color: D.muted, weight: FontWeight.w500, height: 1.2)),
+                        Text(L10n.t('نسخ'), style: txt(11.5, color: D.muted, weight: FontWeight.w500, height: 1.2)),
                       ]),
                     ),
                   ),

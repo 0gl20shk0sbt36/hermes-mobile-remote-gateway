@@ -181,7 +181,33 @@ class HermesStore extends ChangeNotifier {
   final items = <ChatItem>[];
   bool running = false;
   bool opening = false;
-  String statusText = '';
+  // 状态行不要缓存"已翻译"的文本（切语言后会变成旧语言残影）：
+  // 存 key + 参数，渲染时用当前语言现场翻译；服务端/工具原样文本走 _statusRaw。
+  String _statusKey = '';
+  String _statusArg = '';
+  String _statusRaw = '';
+
+  String get statusText => _statusKey.isNotEmpty
+      ? L10n.t(_statusKey, _statusArg.isEmpty ? null : <Object?>[_statusArg])
+      : _statusRaw;
+
+  set statusText(String value) {
+    _statusKey = '';
+    _statusArg = '';
+    _statusRaw = value;
+  }
+
+  void _status(String key, [String arg = '']) {
+    _statusKey = key;
+    _statusArg = arg;
+    _statusRaw = '';
+  }
+
+  void _statusClear() {
+    _statusKey = '';
+    _statusArg = '';
+    _statusRaw = '';
+  }
   Map<String, dynamic> info = {};
   PendingRequest? pending;
   String? toast;
@@ -189,7 +215,32 @@ class HermesStore extends ChangeNotifier {
   /// A refused draft waiting behind the "pull from the other device" offer.
   PullOffer? pendingPull;
   bool pulling = false;
-  String? pullError;
+  String? _pullKey;
+  List<Object?> _pullArgs = const [];
+  String? _pullRaw;
+
+  String? get pullError => _pullKey != null
+      ? L10n.t(_pullKey!, _pullArgs.isEmpty ? null : _pullArgs)
+      : _pullRaw;
+
+  /// 兼容旧写法：直接给成品文本（原样显示，不参与翻译）。
+  set pullError(String? value) {
+    _pullKey = null;
+    _pullArgs = const [];
+    _pullRaw = value;
+  }
+
+  void _pullSet(String key, [List<Object?> args = const []]) {
+    _pullKey = key;
+    _pullArgs = args;
+    _pullRaw = null;
+  }
+
+  void _pullClear() {
+    _pullKey = null;
+    _pullArgs = const [];
+    _pullRaw = null;
+  }
 
   bool submitting = false;
   final queued = <QueuedTurn>[];
@@ -228,7 +279,8 @@ class HermesStore extends ChangeNotifier {
                 ? s['title'] as String
                 : ((s['preview'] as String?)?.trim().isNotEmpty ?? false)
                     ? (s['preview'] as String).trim()
-                    : L10n.t('جلسة بلا عنوان'),
+                    // 留空，交给渲染时用当前语言补默认标题（就地本地化会在切语言后变成旧语言的残影）
+                    : '',
             '${s['source'] ?? ''}',
             (s['started_at'] as num?)?.toDouble() ?? 0,
             (s['message_count'] as num?)?.toInt() ?? 0,
@@ -310,7 +362,7 @@ class HermesStore extends ChangeNotifier {
     final key = storedId, id = sid;
     if (key == null || id == null || opening) return;
     _views.remove(key);
-    _views[key] = _SessionView(id, title, List.of(items), running, statusText);
+    _views[key] = _SessionView(id, title, List.of(items), running, _statusKey, _statusArg, _statusRaw);
     while (_views.length > 12) {
       _views.remove(_views.keys.first);
     }
@@ -341,7 +393,9 @@ class HermesStore extends ChangeNotifier {
         ..clear()
         ..addAll(cached.items);
       running = cached.running;
-      statusText = cached.statusText;
+      _statusKey = cached.statusKey;
+      _statusArg = cached.statusArg;
+      _statusRaw = cached.statusRaw;
       opening = false;
     } else {
       title = row.title;
@@ -379,7 +433,11 @@ class HermesStore extends ChangeNotifier {
         ..addAll(next);
       _applyInfo((r['info'] as Map?)?.cast<String, dynamic>());
       running = isRunning;
-      statusText = isRunning ? (statusText.isEmpty ? L10n.t('يعمل...') : statusText) : '';
+      if (!isRunning) {
+        _statusClear();
+      } else if (_statusKey.isEmpty && _statusRaw.isEmpty) {
+        _status('يعمل...');
+      }
       _lastEventAt = clock();
       _idleStreak = 0;
       _busyStreak = 0;
@@ -416,7 +474,8 @@ class HermesStore extends ChangeNotifier {
     items.clear();
     pending = null;
     running = false;
-    title = L10n.t('جلسة جديدة');
+    // 同上：不把本地化文案固化进数据，渲染处按当前语言兜底
+    title = '';
     notifyListeners();
     try {
       final r = await gw.call('session.create', {'source': 'mobile'});
@@ -491,7 +550,7 @@ class HermesStore extends ChangeNotifier {
     items.add(item);
     if (!steer) {
       running = true;
-      statusText = L10n.t('يفكر...');
+      _status('يفكر...');
       _submittedAt = clock();
     }
     notifyListeners();
@@ -526,7 +585,7 @@ class HermesStore extends ChangeNotifier {
     final offer = pendingPull;
     if (offer == null || pulling) return;
     pulling = true;
-    pullError = null;
+    _pullClear();
     notifyListeners();
     try {
       final r = await gw.call('session.takeover', {'session_id': offer.sessionId}, const Duration(seconds: 45));
@@ -539,17 +598,20 @@ class HermesStore extends ChangeNotifier {
     } on RpcError catch (e) {
       pulling = false;
       final holder = e.data is Map ? (e.data as Map)['holder_surface'] as String? : null;
-      pullError = switch (e.reason) {
-        'TAKEOVER_BUSY' =>
-          L10n.t('الجلسة تعمل الآن على {0} ولم ينتهِ دورها بعد؛ أوقف الدور من هناك ثم حاول السحب مرة أخرى.', [_surfaceAr(holder)]),
-        'TAKEOVER_RACED' => L10n.t('بدأت الجلسة دورًا جديدًا على الجهاز الآخر؛ انتظر قليلًا ثم حاول مرة أخرى.'),
-        'SESSION_CAP' => L10n.t('لا يمكن سحب الجلسة الآن: بلغت حد الجلسات المتزامنة.'),
-        _ => L10n.t('تعذر سحب الجلسة: {0}', [e]),
-      };
+      switch (e.reason) {
+        case 'TAKEOVER_BUSY':
+          _pullSet('الجلسة تعمل الآن على {0} ولم ينتهِ دورها بعد؛ أوقف الدور من هناك ثم حاول السحب مرة أخرى.', [_surfaceAr(holder)]);
+        case 'TAKEOVER_RACED':
+          _pullSet('بدأت الجلسة دورًا جديدًا على الجهاز الآخر؛ انتظر قليلًا ثم حاول مرة أخرى.');
+        case 'SESSION_CAP':
+          _pullSet('لا يمكن سحب الجلسة الآن: بلغت حد الجلسات المتزامنة.');
+        default:
+          _pullSet('تعذر سحب الجلسة: {0}', ['$e']);
+      }
       notifyListeners();
     } catch (e) {
       pulling = false;
-      pullError = L10n.t('تعذر سحب الجلسة: {0}', [e]);
+      _pullSet('تعذر سحب الجلسة: {0}', ['$e']);
       notifyListeners();
     }
   }
@@ -557,7 +619,7 @@ class HermesStore extends ChangeNotifier {
   void dismissPull() {
     if (pendingPull == null && pullError == null) return;
     pendingPull = null;
-    pullError = null;
+    _pullClear();
     notifyListeners();
   }
 
@@ -1015,7 +1077,7 @@ class HermesStore extends ChangeNotifier {
       if (now.difference(_turnEndedAt) > const Duration(seconds: 8) && ++_busyStreak >= 2) {
         _busyStreak = 0;
         running = true;
-        if (statusText.isEmpty) statusText = L10n.t('يعمل...');
+        if (statusText.isEmpty) _status('يعمل...');
       }
     } else if (idle && running) {
       _busyStreak = 0;
@@ -1072,7 +1134,7 @@ class HermesStore extends ChangeNotifier {
         for (final v in _views.values) {
           if (v.sid == e['session_id']) {
             v.running = false;
-            v.statusText = '';
+            v.clearStatus();
           }
         }
       }
@@ -1101,7 +1163,7 @@ class HermesStore extends ChangeNotifier {
         }
       case 'message.start':
         running = true;
-        statusText = L10n.t('يفكر...');
+        _status('يفكر...');
         items.add(ChatItem.assistant(''));
       case 'thinking.delta':
         // Spinner rewrites ("(◔_◔) ruminating...") and provider-wait notices,
@@ -1112,7 +1174,7 @@ class HermesStore extends ChangeNotifier {
         if (t.isNotEmpty) statusText = t;
       case 'reasoning.delta':
         running = true;
-        statusText = L10n.t('يفكر...');
+        _status('يفكر...');
         final t = '${payload['text'] ?? ''}';
         final last = items.isNotEmpty ? items.last : null;
         if (last != null && last.kind == 'thinking' && !last.done) {
@@ -1138,7 +1200,7 @@ class HermesStore extends ChangeNotifier {
         }
       case 'message.delta':
         _closeThinking();
-        statusText = L10n.t('يكتب الرد...');
+        _status('يكتب الرد...');
         final t = '${payload['text'] ?? ''}';
         final target = _streamTarget();
         if (target == null) {
@@ -1168,7 +1230,7 @@ class HermesStore extends ChangeNotifier {
         _drainQueue();
       case 'tool.start':
         _closeThinking();
-        statusText = L10n.t('ينفّذ {0}...', [payload['name'] ?? L10n.t('أداة')]);
+        _status('ينفّذ {0}...', '${payload['name'] ?? L10n.t('أداة')}');
         final ctx = '${payload['context'] ?? payload['preview'] ?? ''}';
         final target = _streamTarget();
         if (target != null && target.text.trim().isEmpty) items.removeLast();
@@ -1309,12 +1371,24 @@ final _attachToken = RegExp(r'''@(?:image|file):(?:`([^`\n]+)`|"([^"\n]+)"|'([^'
 
 /// A session's rendered chat kept across switches.
 class _SessionView {
-  _SessionView(this.sid, this.title, this.items, this.running, this.statusText);
+  _SessionView(this.sid, this.title, this.items, this.running, this.statusKey, this.statusArg, this.statusRaw);
+
+  String get statusText => statusKey.isNotEmpty
+      ? L10n.t(statusKey, statusArg.isEmpty ? null : <Object?>[statusArg])
+      : statusRaw;
+
+  void clearStatus() {
+    statusKey = '';
+    statusArg = '';
+    statusRaw = '';
+  }
   final String sid;
   final String title;
   final List<ChatItem> items;
   bool running;
-  String statusText;
+  String statusKey;
+  String statusArg;
+  String statusRaw;
 }
 
 /// Chat items from `session.resume`'s server-projected `messages`.
