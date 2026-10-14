@@ -22,8 +22,8 @@ void main() {
     final bg = BackgroundConnection();
     await bg.start();
     await bg.start();
-    await bg.update('متصل');
-    await bg.update('متصل');
+    await bg.update('已连接');
+    await bg.update('已连接');
     await bg.stop();
     expect(calls.map((c) => c.method), ['start', 'update', 'stop']);
   });

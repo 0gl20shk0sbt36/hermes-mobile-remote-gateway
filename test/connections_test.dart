@@ -34,16 +34,16 @@ void main() {
 
     test('upsert, list, active, remove round trip', () async {
       expect(await store.list(), isEmpty);
-      await store.upsert(mk('a', 'الجهاز المحلي', 'http://10.0.0.5:9131'));
-      await store.upsert(mk('b', 'الريموت', 'https://gateway.example.com'));
+      await store.upsert(mk('a', '本地设备', 'http://10.0.0.5:9131'));
+      await store.upsert(mk('b', '远程', 'https://gateway.example.com'));
       await store.setActive('b');
 
       final list = await store.list();
       expect(list.length, 2);
-      expect(list[0].name, 'الجهاز المحلي');
+      expect(list[0].name, '本地设备');
       expect(list[1].url, 'https://gateway.example.com');
       expect(await store.activeId(), 'b');
-      expect((await store.active())?.name, 'الريموت');
+      expect((await store.active())?.name, '远程');
 
       // Passwords stay per-entry.
       expect(list[0].pass, 'pw-a');

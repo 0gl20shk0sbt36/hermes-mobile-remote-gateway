@@ -110,8 +110,8 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: Scaffold(body: MessageTile(item: item))));
     await tester.pumpAndSettle();
 
-    expect(find.text('فكّر لمدة 12 ثانية'), findsOneWidget);
-    await tester.tap(find.text('فكّر لمدة 12 ثانية'));
+    expect(find.text('思考了 12 秒'), findsOneWidget);
+    await tester.tap(find.text('思考了 12 秒'));
     await tester.pumpAndSettle();
     expect(find.text('checking the server logs first').hitTestable(), findsOneWidget);
   });
@@ -132,8 +132,8 @@ void main() {
   });
 
   testWidgets('finished reply offers copy; a streaming one does not', (tester) async {
-    final done = ChatItem.assistant('الإجابة النهائية')..done = true;
-    final live = ChatItem.assistant('جارٍ الكتابة')..done = false;
+    final done = ChatItem.assistant('最终回答')..done = true;
+    final live = ChatItem.assistant('正在输入')..done = false;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(body: Column(children: [MessageTile(item: done), MessageTile(item: live)])),
     ));

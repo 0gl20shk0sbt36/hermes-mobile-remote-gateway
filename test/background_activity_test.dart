@@ -268,13 +268,13 @@ void main() {
     gw.events.add({
       'type': 'background.complete',
       'session_id': 'session-a',
-      'payload': {'task_id': 'bg-1', 'text': 'الشهادة انتهت بنجاح'},
+      'payload': {'task_id': 'bg-1', 'text': '任务已成功完成'},
     });
     await Future<void>.delayed(Duration.zero);
 
     final row = store.background.where((b) => b.id == 'bg-1').single;
     expect(row.state, BackgroundState.done);
-    expect(row.detail, 'الشهادة انتهت بنجاح');
+    expect(row.detail, '任务已成功完成');
     expect(store.runningBackground, 0);
   });
 
@@ -336,21 +336,21 @@ void main() {
     );
     await settle(tester);
 
-    expect(find.textContaining('النشاط في الخلفية'), findsOneWidget);
+    expect(find.textContaining('后台活动'), findsOneWidget);
     expect(find.textContaining('3'), findsWidgets);
     expect(find.text('Audit the payment service'), findsNothing);
 
-    await tester.tap(find.textContaining('النشاط في الخلفية'));
+    await tester.tap(find.textContaining('后台活动'));
     await settle(tester);
 
     expect(find.text('Audit the payment service'), findsOneWidget);
     expect(find.textContaining('pytest -q'), findsOneWidget);
 
-    await tester.tap(find.byWidgetPredicate((w) => w is DIconBtn && w.tooltip == 'إيقاف').first);
+    await tester.tap(find.byWidgetPredicate((w) => w is DIconBtn && w.tooltip == '停止').first);
     await settle(tester);
     expect(stopped, ['p-run']);
 
-    await tester.tap(find.byWidgetPredicate((w) => w is DIconBtn && w.tooltip == 'تجاهل').first);
+    await tester.tap(find.byWidgetPredicate((w) => w is DIconBtn && w.tooltip == '忽略').first);
     await settle(tester);
     expect(dismissed, ['p-bad']);
     expect(tester.takeException(), isNull);
@@ -379,14 +379,14 @@ void main() {
         ),
       ),
     );
-    await tester.tap(find.textContaining('النشاط في الخلفية'));
+    await tester.tap(find.textContaining('后台活动'));
     await settle(tester);
     expect(find.textContaining('connection refused'), findsNothing);
 
     await tester.tap(find.textContaining('deploy.sh'));
     await settle(tester);
     expect(find.textContaining('connection refused'), findsOneWidget);
-    expect(find.textContaining('رمز 2'), findsOneWidget);
+    expect(find.textContaining('代码 2'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

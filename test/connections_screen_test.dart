@@ -40,23 +40,23 @@ void main() {
     await pumpList(
       tester,
       conns: [
-        mk('a', 'الجهاز المحلي', 'http://10.0.0.5:9131'),
-        mk('b', 'الريموت جيت وي', 'https://gateway.example.com'),
+        mk('a', '本地设备', 'http://10.0.0.5:9131'),
+        mk('b', '远程网关', 'https://gateway.example.com'),
       ],
       active: 'a',
     );
-    expect(find.text('البوابات والاتصال'), findsOneWidget);
-    expect(find.text('الجهاز المحلي'), findsOneWidget);
-    expect(find.text('الريموت جيت وي'), findsOneWidget);
+    expect(find.text('网关与连接'), findsOneWidget);
+    expect(find.text('本地设备'), findsOneWidget);
+    expect(find.text('远程网关'), findsOneWidget);
     expect(find.text('https://gateway.example.com'), findsOneWidget);
-    expect(find.text('إضافة بوابة'), findsOneWidget);
+    expect(find.text('添加网关'), findsOneWidget);
     // Exactly one active checkmark, on the active row.
     expect(find.byType(tb.CircleCheck), findsOneWidget);
   });
 
   testWidgets('without saved gateways the card still offers the add row', (tester) async {
     await pumpList(tester);
-    expect(find.text('إضافة بوابة'), findsOneWidget);
+    expect(find.text('添加网关'), findsOneWidget);
     expect(find.byType(tb.CircleCheck), findsNothing);
   });
 
@@ -71,19 +71,19 @@ void main() {
     for (var i = 0; i < 8; i++) {
       await tester.pump(const Duration(milliseconds: 120));
     }
-    expect(find.textContaining('تعذر الاتصال بـ «B»'), findsOneWidget);
+    expect(find.textContaining('无法连接到「B」'), findsOneWidget);
   });
 
   testWidgets('editor validates the three fields before saving', (tester) async {
     await tester.pumpWidget(const MaterialApp(home: ConnectionEditorPage()));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('إضافة واتصال'));
+    await tester.tap(find.text('添加并连接'));
     await tester.pumpAndSettle();
-    expect(find.text('أدخل عنوان الخادم.'), findsOneWidget);
+    expect(find.text('请输入服务器地址。'), findsOneWidget);
   });
 
   testWidgets('deleting from the editor confirms, removes the entry and pops deleted', (tester) async {
-    final c = mk('a', 'بوابة قديمة', 'http://10.1.1.1:9131');
+    final c = mk('a', '旧网关', 'http://10.1.1.1:9131');
     await store.upsert(c);
     Object? popped;
     await tester.pumpWidget(MaterialApp(
@@ -101,25 +101,25 @@ void main() {
     ));
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
-    expect(find.text('تعديل البوابة'), findsOneWidget);
+    expect(find.text('编辑网关'), findsOneWidget);
 
-    await tester.tap(find.text('حذف البوابة'));
+    await tester.tap(find.text('删除网关'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('سيُحذف «بوابة قديمة»'), findsOneWidget);
+    expect(find.textContaining('「旧网关」'), findsOneWidget);
 
-    await tester.tap(find.text('حذف'));
+    await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
     expect(popped, 'deleted');
     expect(await store.list(), isEmpty);
   });
 
   testWidgets('editing an existing gateway prefills its fields', (tester) async {
-    final c = mk('a', 'الريموت', 'https://gateway.example.com');
+    final c = mk('a', '远程', 'https://gateway.example.com');
     await tester.pumpWidget(MaterialApp(home: ConnectionEditorPage(existing: c)));
     await tester.pumpAndSettle();
-    expect(find.text('الريموت'), findsOneWidget);
+    expect(find.text('远程'), findsOneWidget);
     expect(find.text('https://gateway.example.com'), findsOneWidget);
     expect(find.text('karem'), findsOneWidget);
-    expect(find.text('حذف البوابة'), findsOneWidget);
+    expect(find.text('删除网关'), findsOneWidget);
   });
 }

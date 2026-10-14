@@ -35,7 +35,7 @@ void main() {
         await tester.pumpAndSettle();
         final button = action == 'send'
             ? find.byWidgetPredicate((w) => w is DIconBtn && w.primary)
-            : find.text(action == 'steer' ? 'توجيه' : 'إلى الطابور');
+            : find.text(action == 'steer' ? '引导' : '加入队列');
         expect(button.hitTestable(), findsOneWidget);
         await tester.tap(button);
         await tester.pumpAndSettle();
@@ -79,9 +79,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(store.queued.length, 1);
     expect(find.text('queued.pdf'), findsOneWidget);
-    expect(find.byTooltip('إعادة إرسال الطابور').hitTestable(), findsOneWidget);
+    expect(find.byTooltip('重新发送队列').hitTestable(), findsOneWidget);
     gw.handler = null;
-    await tester.tap(find.byTooltip('إعادة إرسال الطابور'));
+    await tester.tap(find.byTooltip('重新发送队列'));
     await tester.pumpAndSettle();
     expect(store.queued, isEmpty);
     expect(store.items.where((i) => i.kind == 'user').single.files, [
@@ -109,11 +109,11 @@ void main() {
         ),
       ),
     );
-    await tester.enterText(find.byType(TextField), 'احتفظ بالنص');
+    await tester.enterText(find.byType(TextField), '保留文本');
     await tester.pumpAndSettle();
     await tester.tap(find.byWidgetPredicate((w) => w is DIconBtn && w.primary));
     await tester.pumpAndSettle();
-    expect(find.text('احتفظ بالنص'), findsOneWidget);
+    expect(find.text('保留文本'), findsOneWidget);
     expect(find.text('photo.png'), findsOneWidget);
     expect(store.items.where((i) => i.kind == 'user'), isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -134,7 +134,7 @@ void main() {
         ..info['reasoning_effort'] = 'xhigh'
         ..running = true;
       await store.attach('queued.pdf', [1]);
-      await store.enqueue('رسالة في الطابور');
+      await store.enqueue('队列中的消息');
       await store.attach('draft.png', [2]);
       addTearDown(store.dispose);
       await tester.pumpWidget(
@@ -155,11 +155,11 @@ void main() {
           ),
         ),
       );
-      await tester.enterText(find.byType(TextField), 'توجيه مع مرفقات');
+      await tester.enterText(find.byType(TextField), '带附件的引导');
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.text('توجيه').hitTestable(), findsOneWidget);
-      expect(find.text('إلى الطابور').hitTestable(), findsOneWidget);
+      expect(find.text('引导').hitTestable(), findsOneWidget);
+      expect(find.text('加入队列').hitTestable(), findsOneWidget);
       // The model chip keeps the English Thinking level visible even when narrow.
       expect(find.text('Extra high').hitTestable(), findsOneWidget);
       expect(find.text('queued.pdf'), findsOneWidget);

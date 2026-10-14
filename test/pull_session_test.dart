@@ -25,13 +25,13 @@ void main() {
       return gw.response(method, params);
     };
 
-    final accepted = await store.send('مرحبا');
+    final accepted = await store.send('你好');
 
     expect(accepted, isFalse);
     expect(store.running, isFalse);
     expect(store.items, isEmpty); // the optimistic bubble was rolled back
     expect(store.pendingPull, isNotNull);
-    expect(store.pendingPull!.text, 'مرحبا');
+    expect(store.pendingPull!.text, '你好');
     expect(store.pendingPull!.sessionId, 'session-a');
     expect(store.pullError, isNull);
   });
@@ -54,14 +54,14 @@ void main() {
       return gw.response(method, params);
     };
 
-    await store.send('مرحبا');
+    await store.send('你好');
     await store.acceptPull();
 
     expect([for (final c in gw.calls) c.method], ['prompt.submit', 'session.takeover', 'prompt.submit']);
     expect(store.pendingPull, isNull);
     expect(store.pullError, isNull);
-    expect(store.toast, 'تم سحب الجلسة من سطح المكتب إلى الجوال');
-    expect([for (final i in store.items) i.text], contains('مرحبا'));
+    expect(store.toast, '已将会话从 桌面端 拉到手机');
+    expect([for (final i in store.items) i.text], contains('你好'));
   });
 
   testWidgets('a busy holder keeps the offer up with its reason', (tester) async {
@@ -77,13 +77,13 @@ void main() {
       return gw.response(method, params);
     };
 
-    await store.send('مرحبا');
+    await store.send('你好');
     await store.acceptPull();
 
     expect(store.pendingPull, isNotNull); // retryable
     expect(store.pulling, isFalse);
-    expect(store.pullError, contains('سطح المكتب'));
-    expect(store.pullError, contains('أوقف الدور'));
+    expect(store.pullError, contains('桌面端'));
+    expect(store.pullError, contains('停止这一轮'));
   });
 
   testWidgets('dismissing the offer clears it and shows no error', (tester) async {
@@ -94,7 +94,7 @@ void main() {
       return gw.response(method, params);
     };
 
-    await store.send('مرحبا');
+    await store.send('你好');
     store.dismissPull();
 
     expect(store.pendingPull, isNull);
@@ -109,10 +109,10 @@ void main() {
       return gw.response(method, params);
     };
 
-    final accepted = await store.send('مرحبا');
+    final accepted = await store.send('你好');
 
     expect(accepted, isFalse);
     expect(store.pendingPull, isNull);
-    expect(store.toast, contains('تعذر الإرسال'));
+    expect(store.toast, contains('发送失败'));
   });
 }
