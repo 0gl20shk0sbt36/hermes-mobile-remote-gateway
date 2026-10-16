@@ -1,3 +1,12 @@
+## 1.3.5+9
+
+- The question panel (clarify / approval) can be collapsed: tap the title row to keep just the header
+  plus a one-line summary of the next unanswered question, so the panel stops covering the conversation
+  while you read back. The choice is remembered for the next question too, and a multi-question card
+  shows how many you have already answered. Tapping again expands it back.
+
+`flutter analyze`: 0 issues · `flutter test`: 148 passed.
+
 ## 1.3.4+8
 
 - Reading position is kept while new output arrives: when the transcript is scrolled away from the newest

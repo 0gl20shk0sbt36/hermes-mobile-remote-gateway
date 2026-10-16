@@ -1982,6 +1982,11 @@ class DebugSheet extends StatelessWidget {
 }
 
 class RequestCard extends StatefulWidget {
+  /// 跨请求记住的"收起"偏好：用户收过一次，之后的提问也默认收起。
+  /// 公开是为了让测试能重置它（静态字段会跨用例泄漏）。
+  @visibleForTesting
+  static bool preferCollapsed = false;
+
   const RequestCard({super.key, required this.store});
   final HermesStore store;
   @override
@@ -1993,6 +1998,44 @@ class _RequestCardState extends State<RequestCard> {
   final _picked = <String, Set<String>>{};
   /// qid → "其它答案" 输入框。
   final _other = <String, TextEditingController>{};
+
+  /// 面板收起与否：收起后只留标题行 + 一行摘要，方便边看对话边想。
+  /// 用户切过一次就跨请求记住（同一进程内），下一个提问也按这个习惯来。
+  bool _collapsed = RequestCard.preferCollapsed;
+
+  void _toggleCollapsed() {
+    H.fire(Hx.select);
+    setState(() {
+      _collapsed = !_collapsed;
+      RequestCard.preferCollapsed = _collapsed;
+    });
+  }
+
+  /// 收起状态下显示的那一行：优先还没答的那道题的题干。
+  String _summary() {
+    final p = widget.store.pending!;
+    for (final q in p.questions) {
+      final qid = '${q['qid']}';
+      final picked = _picked[qid] ?? const <String>{};
+      final other = _other[qid]?.text.trim() ?? '';
+      if (picked.isEmpty && other.isEmpty) {
+        final text = '${q['question'] ?? ''}'.trim();
+        if (text.isNotEmpty) return text;
+      }
+    }
+    if (p.questions.isNotEmpty) return '${p.questions.first['question'] ?? ''}'.trim();
+    return '${p.params['question'] ?? p.params['description'] ?? p.params['command'] ?? ''}'.trim();
+  }
+
+  int _answeredCount() {
+    final questions = widget.store.pending?.questions ?? const <Map<String, dynamic>>[];
+    var n = 0;
+    for (final q in questions) {
+      final qid = '${q['qid']}';
+      if ((_picked[qid] ?? const <String>{}).isNotEmpty || (_other[qid]?.text.trim() ?? '').isNotEmpty) n++;
+    }
+    return n;
+  }
 
   /// 服务端给第一个选项追加的推荐后缀（tools/clarify_tool.py RECOMMENDED_LABEL）。
   static const _recommended = ' (Recommended)';
@@ -2082,18 +2125,35 @@ class _RequestCardState extends State<RequestCard> {
       constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.5),
       child: SingleChildScrollView(
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
-          Row(children: [
-            ic(isApproval ? tb.ShieldCheck.new : tb.HelpCircle.new, size: 16, color: kFg),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(isApproval ? L10n.t('مطلوب إذن بالتنفيذ') : L10n.t('سؤال من Hermes'),
-                  style: const TextStyle(fontWeight: FontWeight.w600, color: kFg)),
-            ),
-            if (!isApproval && questions.length > 1)
-              Text(L10n.t('{0} أسئلة', [questions.length]), style: txt(11.5, color: D.muted)),
-          ]),
-          const SizedBox(height: 8),
-          if (isApproval) ...[
+          // 标题行整行可点：收起后只留这一行 + 一行摘要，问答面板不再挡视野。
+          InkWell(
+            onTap: _toggleCollapsed,
+            borderRadius: BorderRadius.circular(D.rLg),
+            child: Row(children: [
+              ic(isApproval ? tb.ShieldCheck.new : tb.HelpCircle.new, size: 16, color: kFg),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(isApproval ? L10n.t('مطلوب إذن بالتنفيذ') : L10n.t('سؤال من Hermes'),
+                    style: const TextStyle(fontWeight: FontWeight.w600, color: kFg)),
+              ),
+              if (!isApproval && questions.length > 1)
+                Text(L10n.t('{0} أسئلة', [questions.length]), style: txt(11.5, color: D.muted)),
+              if (_collapsed && questions.length > 1) ...[
+                const SizedBox(width: 8),
+                Text(L10n.t('{0} من {1} مُجاب', [_answeredCount(), questions.length]),
+                    style: txt(11.5, color: D.accent)),
+              ],
+              const SizedBox(width: 8),
+              Text(L10n.t(_collapsed ? 'وسّع' : 'اطوِ'), style: txt(11.5, color: D.accent)),
+              ic(_collapsed ? tb.ArrowUp.new : tb.ArrowDown.new, size: 16, color: D.accent),
+            ]),
+          ),
+          if (_collapsed) ...[
+            const SizedBox(height: 6),
+            Text(_summary(), maxLines: 2, overflow: TextOverflow.ellipsis, style: txt(12.5, color: kMfg)),
+          ] else ...[
+            const SizedBox(height: 8),
+            if (isApproval) ...[
             if ('${p.params['description'] ?? ''}'.isNotEmpty)
               Text('${p.params['description']}', style: const TextStyle(color: kMfg, fontSize: 12)),
             const SizedBox(height: 6),
@@ -2177,6 +2237,7 @@ class _RequestCardState extends State<RequestCard> {
                 ),
               ),
             ]),
+          ],
           ],
         ]),
       ),
