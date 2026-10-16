@@ -1,3 +1,13 @@
+## 1.3.3+7
+
+- Background activity panel no longer flickers: rows now follow the gateway's report. `process.list` keeps
+  recently-finished processes, so the old "clear a row 6 s after it finishes" timer fought the 6 s poll
+  (row removed, then re-created by the next poll, forever). Rows stay while the server still reports them
+  and disappear once it stops; the linger window now only applies to event-only rows.
+- `_serverRows` is cleared with the session so a re-used id cannot suppress the linger.
+
+`flutter analyze`: 0 issues · `flutter test`: 139 passed.
+
 ## 1.3.2+6
 
 Seven mobile-client fixes reported on 2026-10-16.

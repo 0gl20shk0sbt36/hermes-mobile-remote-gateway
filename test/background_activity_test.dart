@@ -59,7 +59,42 @@ void main() {
     expect(store.runningBackground, 1);
   });
 
-  test('a finished process clears itself while a failure lingers', () async {
+  // 回归（2026-10-16）：面板"偶尔显示偶尔消失"。
+  // 服务端 process.list 会一直带着"刚结束"的进程；旧实现让"结束 6 秒后自动删"
+  // 和 6 秒一次的轮询对撞 —— 删掉 → 下轮建回来 → 再删掉，于是面板 6 秒一闪。
+  test('a finished row the server still reports stays visible (no 6s flicker)', () async {
+    store.backgroundLingerSuccess = const Duration(milliseconds: 60);
+    store.backgroundLingerFailure = const Duration(milliseconds: 60);
+    gw.handler = (method, params) async {
+      switch (method) {
+        case 'process.list':
+          return {'processes': [_proc('p-done', 'sleep 1', 'exited', exit: 0, tail: 'bye')]};
+        case 'subagent.list':
+          return {'subagents': []};
+        default:
+          return {'status': 'ok'};
+      }
+    };
+    await store.refreshBackground();
+    expect(store.background.map((b) => b.id), contains('p-done'));
+
+    // 等过 linger 时长：旧实现在这里就消失了（下轮又被建回来 = 闪）
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(store.background.map((b) => b.id), contains('p-done'),
+        reason: '服务端还在报它 → 不许定时删');
+
+    // 服务端不再报了 → 下一轮轮询才移除
+    gw.handler = (method, params) async => method == 'process.list'
+        ? {'processes': []}
+        : method == 'subagent.list'
+            ? {'subagents': []}
+            : {'status': 'ok'};
+    await store.refreshBackground();
+    expect(store.background, isEmpty, reason: '服务端不再报 → 行才该消失');
+  });
+
+  // 2026-10-16 改写：行跟着服务端报告走 —— 服务端还在报就一直显示；不再报了才消失。
+  test('rows the server stopped reporting clear themselves', () async {
     gw.handler = (method, params) async => switch (method) {
       'process.list' => {
         'processes': [
@@ -74,11 +109,44 @@ void main() {
     await store.refreshBackground();
     expect(store.background.length, 2);
 
-    await Future<void>.delayed(store.backgroundLingerSuccess + const Duration(milliseconds: 60));
-    expect(store.background.map((b) => b.id), isNot(contains('p-ok')));
+    // 服务端还在报 → 定时器不许把它们删掉（这正是那个"6 秒一闪"的根因）
+    await Future<void>.delayed(const Duration(milliseconds: 320));
+    expect(store.background.map((b) => b.id), contains('p-ok'));
     expect(store.background.map((b) => b.id), contains('p-bad'));
 
-    await Future<void>.delayed(store.backgroundLingerFailure + const Duration(milliseconds: 60));
+    // 服务端不再报 → 下一轮轮询移除
+    gw.handler = (method, params) async => switch (method) {
+      'process.list' => {'processes': []},
+      _ => gw.response(method, params),
+    };
+    await store.refreshBackground();
+    expect(store.background, isEmpty);
+  });
+
+  test('event-only rows still honour the linger window (success clears sooner)', () async {
+    store.backgroundLingerSuccess = const Duration(milliseconds: 80);
+    store.backgroundLingerFailure = const Duration(milliseconds: 250);
+    gw.handler = (method, params) async => switch (method) {
+      'process.list' => {'processes': []},
+      'subagent.list' => {'subagents': []},
+      _ => gw.response(method, params),
+    };
+    await store.refreshBackground(); // 服务端什么都没报 → 这两个 id 属于"事件型行"
+    for (final (id, status) in [('sub-ok', 'completed'), ('sub-bad', 'failed')]) {
+      gw.events.add({
+        'type': 'subagent.complete',
+        'session_id': 'session-a',
+        'payload': {'goal': 'run $id', 'task_count': 1, 'task_index': 0, 'subagent_id': id, 'status': status},
+      });
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(store.background.length, 2);
+
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(store.background.map((b) => b.id), isNot(contains('sub-ok')));
+    expect(store.background.map((b) => b.id), contains('sub-bad'));
+
+    await Future<void>.delayed(const Duration(milliseconds: 220));
     expect(store.background, isEmpty);
   });
 

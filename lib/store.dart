@@ -974,6 +974,13 @@ class HermesStore extends ChangeNotifier {
 
   final _dismissed = <String>{};
   final _linger = <String, Timer>{};
+
+  /// 上一轮轮询里服务端仍然在报的 id（进程/子代理）。
+  ///
+  /// 服务端的 `process.list` 语义是"运行中 **+ 刚结束**的进程"。旧实现让"结束 6 秒后自动消失"
+  /// 和轮询直接打架：删掉 → 下一轮又被服务端报回来 → 再删掉，于是面板 6 秒一个来回地闪。
+  /// 现在行跟着服务端走：还在报就留着，服务端不再报了才删。
+  final _serverRows = <String>{};
   Timer? _bgTimer;
   bool _bgBusy = false;
 
@@ -1000,6 +1007,7 @@ class HermesStore extends ChangeNotifier {
     }
     _linger.clear();
     _dismissed.clear();
+    _serverRows.clear();
     background.clear();
     notifyListeners();
   }
@@ -1007,8 +1015,11 @@ class HermesStore extends ChangeNotifier {
   /// Finished rows clear themselves so the strip only ever holds live work.
   /// Failures linger longer so the exit code stays readable; a row that goes
   /// back to running cancels its pending clear.
+  ///
+  /// 2026-10-16 修正：**服务端还在报的行不许定时删**。`process.list` 会一直带着刚结束的进程，
+  /// 定时删 + 下一轮又报回来 = 面板 6 秒一闪。服务端不再报了（或事件型行）才走 linger。
   void _armLinger(BackgroundActivity row) {
-    if (row.running) {
+    if (row.running || _serverRows.contains(row.id)) {
       _linger.remove(row.id)?.cancel();
       return;
     }
@@ -1044,8 +1055,20 @@ class HermesStore extends ChangeNotifier {
         gw.call('subagent.list', {'session_id': id}),
       ]);
       if (_sid != id) return;
-      _reconcileProcesses((results[0] as Map?)?['processes'] as List? ?? const []);
-      _reconcileSubagents((results[1] as Map?)?['subagents'] as List? ?? const []);
+      final processes = (results[0] as Map?)?['processes'] as List? ?? const [];
+      final subagents = (results[1] as Map?)?['subagents'] as List? ?? const [];
+      _serverRows
+        ..clear()
+        ..addAll(_reportedIds(processes, 'session_id'))
+        ..addAll(_reportedIds(subagents, 'subagent_id'));
+      _reconcileProcesses(processes);
+      _reconcileSubagents(subagents);
+      // 服务端已经不再报、且不是"运行中"的行 = 真的结束了 → 删掉。
+      // 反过来：**服务端还在报的（含刚结束的）保持可见**，这是面板不闪的关键。
+      background.removeWhere((b) =>
+          (b.kind == 'process' || b.kind == 'subagent') &&
+          !b.running &&
+          !_serverRows.contains(b.id));
     } catch (_) {
       // Transient socket loss, or a backend without these RPCs: keep the
       // event-fed rows and let the next poll retry.
@@ -1054,6 +1077,11 @@ class HermesStore extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  Set<String> _reportedIds(List rows, String key) => {
+        for (final raw in rows)
+          if (raw is Map && '${raw[key] ?? ''}'.isNotEmpty) '${raw[key]}',
+      };
 
   void _reconcileProcesses(List rows) {
     final reported = <String>{};
