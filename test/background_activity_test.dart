@@ -356,9 +356,10 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('expanded row reveals the captured output tail', (tester) async {
+  testWidgets('tapping a row opens its detail instead of expanding inline', (tester) async {
     await tester.binding.setSurfaceSize(const Size(360, 720));
     addTearDown(() => tester.binding.setSurfaceSize(null));
+    BackgroundActivity? opened;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -375,18 +376,60 @@ void main() {
             ],
             onStop: (_) async {},
             onDismiss: (_) {},
+            onOpen: (item) => opened = item,
           ),
         ),
       ),
     );
     await tester.tap(find.textContaining('النشاط في الخلفية'));
     await settle(tester);
-    expect(find.textContaining('connection refused'), findsNothing);
+    expect(find.textContaining('connection refused'), findsNothing, reason: '正文不再塞在列表里');
 
     await tester.tap(find.textContaining('deploy.sh'));
     await settle(tester);
-    expect(find.textContaining('connection refused'), findsOneWidget);
+    expect(opened?.id, 'p-bad');
     expect(find.textContaining('رمز 2'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  // 回归（2026-10-16）：面板挂在 composer 上方、从底部往上长。没有高度上限时，
+  // 行一多整块面板就顶出屏幕，**收缩按钮跑到屏幕外点不到**。
+  testWidgets('a long list stays inside the screen and keeps the toggle tappable', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BackgroundStrip(
+            items: [
+              for (var i = 0; i < 12; i++)
+                BackgroundActivity(
+                  id: 'p-$i',
+                  kind: 'process',
+                  title: 'job-$i.sh',
+                  state: BackgroundState.running,
+                ),
+            ],
+            onStop: (_) async {},
+            onDismiss: (_) {},
+            onOpen: (_) {},
+          ),
+        ),
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.textContaining('النشاط في الخلفية'));
+    await settle(tester);
+
+    // 收缩按钮仍在屏幕内且可点：面板高度封顶 + 内部可滚。
+    final header = find.textContaining('النشاط في الخلفية');
+    expect(tester.getRect(header).top, greaterThanOrEqualTo(0));
+    expect(tester.getRect(header).bottom, lessThanOrEqualTo(640));
+    expect(find.byType(ListView), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(header);
+    await settle(tester);
+    expect(find.text('job-0.sh'), findsNothing, reason: '再点一次应能收起');
   });
 }

@@ -15,6 +15,7 @@ import 'package:tabler_icons_next/tabler_icons_next.dart' as tb;
 
 import 'api.dart';
 import 'connections.dart';
+import 'demo.dart';
 import 'design.dart';
 import 'glass.dart';
 import 'notify.dart';
@@ -199,6 +200,15 @@ class _BootState extends State<Boot> {
   }
 
   Future<void> _init() async {
+    // 演示/取证模式：不读凭据、不连服务器，直接进首页看假数据（见 lib/demo.dart）。
+    if (demoMode) {
+      setState(() {
+        api = HermesApi('http://demo.invalid', 'demo', 'demo');
+        locked = false;
+        ready = true;
+      });
+      return;
+    }
     final a = await HermesApi.load();
     final bio = a != null && await HermesApi.biometricEnabled();
     setState(() {
@@ -549,6 +559,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     currentApi = widget.api;
     gw = Gateway(widget.api);
     store = HermesStore(gw);
+    if (demoMode) {
+      // 演示/取证模式：灌假数据，不连服务器（不碰任何凭据）。
+      seedDemo(store);
+      store.addListener(_toast);
+      WidgetsBinding.instance.addObserver(this);
+      return;
+    }
     store.addListener(_toast);
     store.addListener(_pullOffer);
     WidgetsBinding.instance.addObserver(this);
@@ -807,10 +824,23 @@ class TopBar extends StatelessWidget {
         _BarBtn(icon: tb.Menu2.new, tooltip: L10n.t('الجلسات'), onPressed: onMenu),
         const SizedBox(width: 4),
         Expanded(
-          child: DTextSwap(
-            title,
-            textDirection: _dirOf(title),
-            style: txt(15.5, weight: FontWeight.w600, height: 1.3),
+          // 长按标题 = 打开调试面板（诊断 WS 事件 / 服务端请求 / 本机回执）。
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPress: () {
+              H.fire(Hx.medium);
+              showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                backgroundColor: Colors.transparent,
+                builder: (_) => DebugSheet(store: store),
+              );
+            },
+            child: DTextSwap(
+              title,
+              textDirection: _dirOf(title),
+              style: txt(15.5, weight: FontWeight.w600, height: 1.3),
+            ),
           ),
         ),
         if (store.sid != null)
@@ -1153,7 +1183,7 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
   }
 }
 
-class ChatView extends StatelessWidget {
+class ChatView extends StatefulWidget {
   const ChatView({super.key, required this.store, this.insets = EdgeInsets.zero});
   final HermesStore store;
 
@@ -1165,6 +1195,43 @@ class ChatView extends StatelessWidget {
     (tb.Terminal2.new, L10n.t('افحص حالة الخادم وأبلغني بأي مشكلة')),
     (tb.FileText.new, L10n.t('اقرأ الملف المرفق واستخرج أهم النقاط')),
   ];
+
+  @override
+  State<ChatView> createState() => _ChatViewState();
+}
+
+class _ChatViewState extends State<ChatView> {
+  // 常显滚动条：不显示时用户没法判断自己滑到对话的哪个位置了。
+  final _scroll = ScrollController();
+  bool _awayFromLatest = false;
+
+  HermesStore get store => widget.store;
+  EdgeInsets get insets => widget.insets;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
+    final away = _scroll.hasClients && _scroll.offset > 120;
+    if (away != _awayFromLatest) setState(() => _awayFromLatest = away);
+  }
+
+  void _toLatest() {
+    H.fire(Hx.select);
+    if (_scroll.hasClients) {
+      _scroll.animateTo(0, duration: D.tIn, curve: D.ease);
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1213,7 +1280,7 @@ class ChatView extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(L10n.t('يعمل Hermes على خادمك بأدواته وملفاته.'), style: txt(14, color: D.muted)),
                 const SizedBox(height: 22),
-                for (final (icon, label) in _starters)
+                for (final (icon, label) in ChatView._starters)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: DSuggestion(icon: icon, label: label, onTap: () => store.requestDraft(label)),
@@ -1226,25 +1293,54 @@ class ChatView extends StatelessWidget {
     }
     final items = store.items.reversed.toList();
     final extra = store.running ? 1 : 0;
-    return ListView.builder(
-      reverse: true,
-      // reverse: the first padding edge is the bottom (composer side).
-      padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
-      itemCount: items.length + extra,
-      itemBuilder: (context, i) {
-        if (extra == 1 && i == 0) return RunningLine(store: store);
-        final it = items[i - extra];
-        // Steps sit tight together; conversation turns get room to breathe.
-        final older = i - extra + 1 < items.length ? items[i - extra + 1] : null;
-        final step = it.kind == 'tool' || it.kind == 'thinking';
-        final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
-        final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
-        return EnterAnim(
-          key: ObjectKey(it),
-          child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
-        );
-      },
-    );
+    // 包一层 SelectionArea：长按 = 原生文本选择（可拖手柄选一部分），
+    // 而不是把整条消息一次性复制走。gpt_markdown 自己的文档也是这个用法。
+    return Stack(children: [
+      Positioned.fill(
+        child: Scrollbar(
+          controller: _scroll,
+          // thumbVisibility: 常显。手机上没有常显滚动条就完全不知道滑到哪了。
+          thumbVisibility: true,
+          interactive: true,
+          thickness: 3.5,
+          radius: const Radius.circular(3),
+          child: SelectionArea(
+            child: ListView.builder(
+              controller: _scroll,
+              reverse: true,
+              // reverse: the first padding edge is the bottom (composer side).
+              padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
+              itemCount: items.length + extra,
+              itemBuilder: (context, i) {
+                if (extra == 1 && i == 0) return RunningLine(store: store);
+                final it = items[i - extra];
+                // Steps sit tight together; conversation turns get room to breathe.
+                final older = i - extra + 1 < items.length ? items[i - extra + 1] : null;
+                final step = it.kind == 'tool' || it.kind == 'thinking';
+                final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
+                final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
+                return EnterAnim(
+                  key: ObjectKey(it),
+                  child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+      // 往上翻过之后给一个一键回到底部（反列表里 offset 0 就是最新）。
+      if (_awayFromLatest)
+        Positioned(
+          right: 14,
+          bottom: 14 + insets.bottom,
+          child: DIconBtn(
+            icon: tb.ArrowDown.new,
+            size: 40,
+            tooltip: L10n.t('إلى الأحدث'),
+            onPressed: _toLatest,
+          ),
+        ),
+    ]);
   }
 }
 
@@ -1285,6 +1381,15 @@ class _MessageTileState extends State<MessageTile> {
     _snack(L10n.t('تم النسخ'));
   }
 
+  void _openPayload(ChatItem it, {int initial = 0}) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _PayloadSheet(item: it, initial: initial),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final it = widget.item;
@@ -1298,16 +1403,18 @@ class _MessageTileState extends State<MessageTile> {
               for (final f in it.files)
                 Padding(padding: const EdgeInsets.only(bottom: 6), child: MediaCard(path: f, compact: true)),
               if (it.text.isNotEmpty)
-                GestureDetector(
-                  onLongPress: () => _copy(it.text),
-                  child: DCard(
+                DCard(
                     color: D.bubble,
                     radius: D.rLg,
                     shadow: const [],
                     pad: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
                     child: Text(it.text, textDirection: _dirOf(it.text), style: txt(15, height: 1.55)),
                   ),
-                ),
+              // 长按改成原生选择后，保留"一键复制整条"的入口
+              if (it.text.isNotEmpty && it.done)
+                DActionRow(textDirection: _dirOf(it.text), actions: [
+                  (tb.Copy.new, L10n.t('نسخ'), () => _copy(it.text)),
+                ]),
             ]),
           ),
         );
@@ -1316,9 +1423,7 @@ class _MessageTileState extends State<MessageTile> {
         final body = it.text.replaceAll(RegExp(r'^[ \t]*MEDIA:[^\n]*\n?', multiLine: true), '').trim();
         return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           if (body.isNotEmpty)
-            GestureDetector(
-              onLongPress: () => _copy(body),
-              child: GptMarkdownTheme(
+            GptMarkdownTheme(
                 gptThemeData: _mdTheme,
                 child: GptMarkdown(
                   body,
@@ -1331,7 +1436,6 @@ class _MessageTileState extends State<MessageTile> {
                   ),
                 ),
               ),
-            ),
           for (final path in media)
             Padding(padding: const EdgeInsets.only(top: 8), child: MediaCard(path: path)),
           if (body.isNotEmpty && it.done)
@@ -1362,6 +1466,9 @@ class _MessageTileState extends State<MessageTile> {
           ),
         );
       case 'tool':
+        final hasBody = it.argsText.trim().isNotEmpty ||
+            it.resultText.trim().isNotEmpty ||
+            it.detail.trim().isNotEmpty;
         return DStepRow(
           icon: _toolIcon(it.text),
           tone: it.done ? D.muted : D.accent,
@@ -1369,7 +1476,9 @@ class _MessageTileState extends State<MessageTile> {
           labelDirection: TextDirection.ltr,
           detail: it.detail,
           open: open,
-          onTap: it.detail.isEmpty ? null : () => setState(() => open = !open),
+          // 以前只有 detail 非空才可点、展开也只看得到一行；现在整行可点，
+          // 展开给出完整入参 + 返回值。
+          onTap: hasBody ? () => setState(() => open = !open) : null,
           trailing: DSwap(
             id: it.done,
             turn: false,
@@ -1388,11 +1497,30 @@ class _MessageTileState extends State<MessageTile> {
                     const RepaintBoundary(child: SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: D.accent))),
                   ]),
           ),
-          body: Directionality(
-            textDirection: TextDirection.ltr,
-            child: SelectableText(it.detail,
-                style: txt(11.5, color: D.muted, height: 1.5).copyWith(fontFamily: 'monospace')),
-          ),
+          body: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+            if (it.argsText.trim().isNotEmpty)
+              DPayload(
+                title: L10n.t('الوسائط'),
+                text: it.argsText,
+                maxHeight: 180,
+                onCopy: () => _copy(it.argsText),
+                onExpand: () => _openPayload(it, initial: 0),
+              ),
+            if (it.resultText.trim().isNotEmpty)
+              DPayload(
+                title: L10n.t('النتيجة'),
+                text: it.resultText,
+                maxHeight: 260,
+                onCopy: () => _copy(it.resultText),
+                onExpand: () => _openPayload(it, initial: 1),
+              ),
+            if (it.argsText.trim().isEmpty && it.resultText.trim().isEmpty && it.detail.trim().isNotEmpty)
+              Directionality(
+                textDirection: TextDirection.ltr,
+                child: SelectableText(it.detail,
+                    style: txt(11.5, color: D.muted, height: 1.5).copyWith(fontFamily: 'monospace')),
+              ),
+          ]),
         );
       default:
         return Container(
@@ -1462,6 +1590,333 @@ IconCtor _toolIcon(String name) {
   return tb.Tool.new;
 }
 
+/// 工具调用的全屏正文：完整入参 + 返回值，可选中、可复制。
+class _PayloadSheet extends StatefulWidget {
+  const _PayloadSheet({required this.item, this.initial = 0});
+  final ChatItem item;
+  final int initial;
+
+  @override
+  State<_PayloadSheet> createState() => _PayloadSheetState();
+}
+
+class _PayloadSheetState extends State<_PayloadSheet> {
+  late int tab = widget.initial;
+
+  @override
+  Widget build(BuildContext context) {
+    final it = widget.item;
+    final tabs = <(String, String)>[
+      if (it.argsText.trim().isNotEmpty) (L10n.t('الوسائط'), it.argsText),
+      if (it.resultText.trim().isNotEmpty) (L10n.t('النتيجة'), it.resultText),
+      if (it.argsText.trim().isEmpty && it.resultText.trim().isEmpty) (L10n.t('التفاصيل'), it.detail),
+    ];
+    if (tabs.length <= tab) tab = tabs.length - 1;
+    final body = tabs.isEmpty ? '' : tabs[tab.clamp(0, tabs.length - 1)].$2;
+    return DGlass(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+      radius: D.rLg,
+      tint: G.panelTint,
+      panel: true,
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.86,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 8, 8),
+            child: Row(children: [
+              ic(_toolIcon(it.text), size: 16, color: D.accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(it.text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textDirection: TextDirection.ltr,
+                    style: txt(14, weight: FontWeight.w600)),
+              ),
+              DIconBtn(
+                icon: tb.Copy.new,
+                size: 36,
+                tooltip: L10n.t('نسخ'),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: body));
+                  DFeedback.show(context, L10n.t('تم النسخ'));
+                },
+              ),
+              DIconBtn(
+                icon: tb.X.new,
+                size: 36,
+                tooltip: L10n.t('إغلاق'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ]),
+          ),
+          if (tabs.length > 1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: DSegmented(
+                options: [for (var i = 0; i < tabs.length; i++) '$i'],
+                labels: [for (final t in tabs) t.$1],
+                value: '$tab',
+                onChanged: (v) => setState(() => tab = int.tryParse(v) ?? 0),
+              ),
+            ),
+          Expanded(
+            child: Container(
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF100E0D),
+                borderRadius: BorderRadius.circular(D.rMd),
+                border: Border.all(color: D.borderSoft),
+              ),
+              child: Directionality(
+                textDirection: TextDirection.ltr,
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    body.trim(),
+                    style: txt(12, color: D.fg, height: 1.55).copyWith(fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// 一条后台活动（子代理 / 进程）的详情：子代理实时拉 transcript 尾巴并轮询刷新。
+class BackgroundDetailSheet extends StatefulWidget {
+  const BackgroundDetailSheet({super.key, required this.store, required this.item});
+  final HermesStore store;
+  final BackgroundActivity item;
+
+  @override
+  State<BackgroundDetailSheet> createState() => _BackgroundDetailSheetState();
+}
+
+class _BackgroundDetailSheetState extends State<BackgroundDetailSheet> {
+  Timer? _timer;
+  String tail = '';
+  bool loading = false;
+  String? error;
+
+  BackgroundActivity get item {
+    // 行对象可能被后续事件更新（状态、toolCount），展示时取最新的那条。
+    for (final row in widget.store.background) {
+      if (row.id == widget.item.id) return row;
+    }
+    return widget.item;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final isSubagent = widget.item.kind == 'subagent';
+    if (isSubagent) {
+      _pull();
+      // 子代理的 transcript 只有服务端有（subagent.tail），开着面板时轮询刷新。
+      _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+        if (mounted && item.running) _pull();
+      });
+    } else {
+      setState(() => tail = widget.item.detail);
+    }
+  }
+
+  Future<void> _pull() async {
+    if (loading || !mounted) return;
+    loading = true;
+    final text = await widget.store.subagentTail(widget.item.id);
+    if (!mounted) return;
+    setState(() {
+      loading = false;
+      if (text.trim().isNotEmpty) tail = text;
+      error = text.trim().isEmpty && tail.isEmpty ? L10n.t('لا يوجد نص بعد') : null;
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final row = item;
+    final isSubagent = row.kind == 'subagent';
+    final meta = [
+      if (row.state == BackgroundState.running) L10n.t('قيد التشغيل') else if (row.state == BackgroundState.failed) L10n.t('فشل') else L10n.t('انتهى'),
+      if (row.model != null && row.model!.isNotEmpty) row.model!,
+      if (row.toolCount != null && row.toolCount! > 0) L10n.t('أدوات: {0}', [row.toolCount]),
+      if (row.subtitle.isNotEmpty) row.subtitle,
+    ].join(' · ');
+    return DGlass(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+      radius: D.rLg,
+      tint: G.panelTint,
+      panel: true,
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.86,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 8, 4),
+            child: Row(children: [
+              ic(isSubagent ? tb.BinaryTree.new : tb.Terminal2.new, size: 16, color: D.accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(row.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textDirection: dDirOf(row.title),
+                    style: txt(14, weight: FontWeight.w600)),
+              ),
+              if (row.running)
+                DIconBtn(
+                  icon: tb.PlayerStop.new,
+                  size: 36,
+                  tooltip: L10n.t('إيقاف'),
+                  tint: D.danger,
+                  onPressed: () async {
+                    final navigator = Navigator.of(context);
+                    await widget.store.stopBackground(row.id);
+                    navigator.pop();
+                  },
+                ),
+              DIconBtn(
+                icon: tb.X.new,
+                size: 36,
+                tooltip: L10n.t('إغلاق'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(meta, textDirection: dDirOf(meta), style: txt(11.5, color: D.muted)),
+          ),
+          Expanded(
+            child: Container(
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF100E0D),
+                borderRadius: BorderRadius.circular(D.rMd),
+                border: Border.all(color: D.borderSoft),
+              ),
+              child: tail.trim().isEmpty
+                  ? Center(
+                      child: Text(
+                        error ?? (loading ? L10n.t('جارٍ التحميل...') : L10n.t('لا يوجد نص بعد')),
+                        style: txt(12.5, color: D.muted),
+                      ),
+                    )
+                  : Directionality(
+                      textDirection: TextDirection.ltr,
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          tail,
+                          style: txt(11.5, color: D.fg, height: 1.5).copyWith(fontFamily: 'monospace'),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// 现场取证面板：按时间顺序列出收到的服务端事件/请求与本机回执（敏感值已打码）。
+/// 入口：长按顶栏标题。自查 bug 时把这个面板的文本 dump 出来即可。
+class DebugSheet extends StatelessWidget {
+  const DebugSheet({super.key, required this.store});
+  final HermesStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    return DGlass(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+      radius: D.rLg,
+      tint: G.panelTint,
+      panel: true,
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.86,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 8, 8),
+            child: Row(children: [
+              ic(tb.ListDetails.new, size: 16, color: D.accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(L10n.t('سجل التشخيص ({0})', [store.debugLines.length]),
+                    style: txt(14, weight: FontWeight.w600)),
+              ),
+              DIconBtn(
+                icon: tb.Copy.new,
+                size: 36,
+                tooltip: L10n.t('نسخ الكل'),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: store.debugLines.join('\n')));
+                  DFeedback.show(context, L10n.t('تم النسخ'));
+                },
+              ),
+              DIconBtn(
+                icon: tb.Trash.new,
+                size: 36,
+                tooltip: L10n.t('تفريغ'),
+                onPressed: store.clearTrace,
+              ),
+              DIconBtn(
+                icon: tb.X.new,
+                size: 36,
+                tooltip: L10n.t('إغلاق'),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ]),
+          ),
+          Expanded(
+            child: ListenableBuilder(
+              listenable: store,
+              builder: (context, _) => Container(
+                margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF100E0D),
+                  borderRadius: BorderRadius.circular(D.rMd),
+                  border: Border.all(color: D.borderSoft),
+                ),
+                child: store.debugLines.isEmpty
+                    ? Center(child: Text(L10n.t('لا شيء بعد'), style: txt(12.5, color: D.muted)))
+                    : ListView.builder(
+                        reverse: true,
+                        itemCount: store.debugLines.length,
+                        itemBuilder: (context, i) {
+                          final line = store.debugLines[store.debugLines.length - 1 - i];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: Directionality(
+                              textDirection: TextDirection.ltr,
+                              child: SelectableText(
+                                line,
+                                style: txt(10.5, color: D.muted, height: 1.4).copyWith(fontFamily: 'monospace'),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
 class RequestCard extends StatefulWidget {
   const RequestCard({super.key, required this.store});
   final HermesStore store;
@@ -1470,17 +1925,79 @@ class RequestCard extends StatefulWidget {
 }
 
 class _RequestCardState extends State<RequestCard> {
-  final ctl = TextEditingController();
+  /// qid → 已选选项。单选集合里最多一个，多选可以多个。
+  final _picked = <String, Set<String>>{};
+  /// qid → "其它答案" 输入框。
+  final _other = <String, TextEditingController>{};
 
-  String _firstQuestion(Map<String, dynamic> p) {
-    final qs = p['questions'] as List?;
-    return (qs != null && qs.isNotEmpty) ? '${qs.first['question']}' : '';
+  /// 服务端给第一个选项追加的推荐后缀（tools/clarify_tool.py RECOMMENDED_LABEL）。
+  static const _recommended = ' (Recommended)';
+
+  @override
+  void dispose() {
+    for (final c in _other.values) {
+      c.dispose();
+    }
+    super.dispose();
   }
 
-  List<String> _firstChoices(Map<String, dynamic> p) {
-    final qs = p['questions'] as List?;
-    if (qs == null || qs.isEmpty) return const [];
-    return ((qs.first['choices'] as List?) ?? const []).map((e) => '$e').toList();
+  String _plain(String choice) => choice.endsWith(_recommended)
+      ? choice.substring(0, choice.length - _recommended.length).trim()
+      : choice;
+
+  bool _isRecommended(String choice) => choice.endsWith(_recommended);
+
+  TextEditingController _ctlFor(String qid) => _other.putIfAbsent(qid, () {
+        final c = TextEditingController();
+        c.addListener(() {
+          if (mounted) setState(() {});
+        });
+        return c;
+      });
+
+  void _pick(String qid, String choice, bool multi) {
+    H.fire(Hx.select);
+    setState(() {
+      final set = _picked.putIfAbsent(qid, () => <String>{});
+      if (multi) {
+        if (!set.remove(choice)) set.add(choice);
+      } else {
+        set
+          ..clear()
+          ..add(choice);
+      }
+    });
+  }
+
+  /// 组装 clarify 回执。协议：``{"answers": {qid: value}}``；
+  /// 没答的 qid 不放进去（服务端记为 unanswered）；多选给数组。
+  Map<String, Object?> _answers() {
+    final out = <String, Object?>{};
+    for (final q in widget.store.pending?.questions ?? const <Map<String, dynamic>>[]) {
+      final qid = '${q['qid']}';
+      final multi = q['multi_select'] == true;
+      final picked = _picked[qid] ?? const <String>{};
+      final other = _other[qid]?.text.trim() ?? '';
+      if (multi) {
+        final list = <String>[for (final c in picked) c];
+        if (other.isNotEmpty) list.add(other);
+        if (list.isNotEmpty) out[qid] = list;
+      } else {
+        final value = other.isNotEmpty ? other : (picked.isEmpty ? '' : picked.first);
+        if (value.isNotEmpty) out[qid] = value;
+      }
+    }
+    return out;
+  }
+
+  void _submit() {
+    final answers = _answers();
+    if (answers.isEmpty) {
+      DFeedback.show(context, L10n.t('أجب على سؤال واحد على الأقل'));
+      return;
+    }
+    H.fire(Hx.medium);
+    widget.store.answerClarify(answers);
   }
 
   @override
@@ -1488,7 +2005,8 @@ class _RequestCardState extends State<RequestCard> {
     final p = widget.store.pending!;
     final isApproval = p.method == 'approval';
     final direct = ((p.params['choices'] as List?) ?? const []).map((e) => '$e').toList();
-    final choices = direct.isEmpty ? _firstChoices(p.params) : direct;
+    final questions = p.questions;
+    final answered = _answers().isNotEmpty;
     return DGlass(
       margin: const EdgeInsets.fromLTRB(10, 0, 10, 6),
       pad: const EdgeInsets.all(12),
@@ -1503,8 +2021,12 @@ class _RequestCardState extends State<RequestCard> {
           Row(children: [
             ic(isApproval ? tb.ShieldCheck.new : tb.HelpCircle.new, size: 16, color: kFg),
             const SizedBox(width: 8),
-            Text(isApproval ? L10n.t('مطلوب إذن بالتنفيذ') : L10n.t('سؤال من Hermes'),
-                style: const TextStyle(fontWeight: FontWeight.w600, color: kFg)),
+            Expanded(
+              child: Text(isApproval ? L10n.t('مطلوب إذن بالتنفيذ') : L10n.t('سؤال من Hermes'),
+                  style: const TextStyle(fontWeight: FontWeight.w600, color: kFg)),
+            ),
+            if (!isApproval && questions.length > 1)
+              Text(L10n.t('{0} أسئلة', [questions.length]), style: txt(11.5, color: D.muted)),
           ]),
           const SizedBox(height: 8),
           if (isApproval) ...[
@@ -1535,6 +2057,15 @@ class _RequestCardState extends State<RequestCard> {
                         onPressed: () => widget.store.answer({'choice': 'session'}))),
                 const SizedBox(width: 8),
               ],
+              if (p.params['allow_permanent'] == true) ...[
+                Expanded(
+                    child: DBtn(
+                        label: L10n.t('دائمًا'),
+                        dense: true,
+                        kind: DBtnKind.outline,
+                        onPressed: () => widget.store.answer({'choice': 'always'}))),
+                const SizedBox(width: 8),
+              ],
               Expanded(
                   child: DBtn(
                       label: L10n.t('رفض'),
@@ -1543,42 +2074,43 @@ class _RequestCardState extends State<RequestCard> {
                       haptic: Hx.heavy,
                       onPressed: () => widget.store.answer({'choice': 'deny'}))),
             ]),
-          ] else ...[
-            Text('${p.params['question'] ?? _firstQuestion(p.params)}', style: const TextStyle(color: kFg, height: 1.5)),
+          ] else if (direct.isNotEmpty && questions.isEmpty) ...[
+            // 老式单题卡（只有顶层 choices，没有 questions[]）。
+            Text('${p.params['question'] ?? ''}', style: const TextStyle(color: kFg, height: 1.5)),
             const SizedBox(height: 8),
-            for (final c in choices)
+            for (final c in direct)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: DBtn(
-                  label: c,
-                  kind: DBtnKind.outline,
-                  onPressed: () => widget.store.answer({'answer': c}),
+                  label: _plain(c),
+                  kind: _isRecommended(c) ? DBtnKind.fill : DBtnKind.outline,
+                  onPressed: () => widget.store.answerClarify({'q0': _plain(c)}),
                 ),
               ),
+          ] else ...[
+            for (var i = 0; i < questions.length; i++) ...[
+              if (i > 0) const Divider(height: 22, thickness: 0.6),
+              _questionBlock(questions[i], i + 1, questions.length),
+            ],
+            const SizedBox(height: 12),
             Row(children: [
               Expanded(
-                child: DInput(
-                  child: TextField(
-                    controller: ctl,
-                    style: txt(13.5),
-                    cursorColor: D.accent,
-                    decoration: InputDecoration(
-                      isDense: true,
-                      hintText: L10n.t('إجابة أخرى'),
-                      hintStyle: TextStyle(color: D.muted, fontSize: 13.5),
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                  ),
+                child: DBtn(
+                  label: L10n.t('إلغاء'),
+                  dense: true,
+                  kind: DBtnKind.outline,
+                  onPressed: () => widget.store.cancelPending(),
                 ),
               ),
               const SizedBox(width: 8),
-              DIconBtn(
-                icon: tb.ArrowUp.new,
-                primary: true,
-                onPressed: () {
-                  if (ctl.text.trim().isNotEmpty) widget.store.answer({'answer': ctl.text.trim()});
-                },
+              Expanded(
+                flex: 2,
+                child: DBtn(
+                  label: L10n.t('إرسال الإجابة'),
+                  icon: tb.Send.new,
+                  dense: true,
+                  onPressed: answered ? _submit : null,
+                ),
               ),
             ]),
           ],
@@ -1586,6 +2118,59 @@ class _RequestCardState extends State<RequestCard> {
       ),
       ),
     );
+  }
+
+  /// 一道题：题干 + 选项（单选/多选取自 multi_select）+ 其它答案输入。
+  Widget _questionBlock(Map<String, dynamic> q, int index, int total) {
+    final qid = '${q['qid']}';
+    final multi = q['multi_select'] == true;
+    final choices = ((q['choices'] as List?) ?? const []).map((e) => '$e').toList();
+    final picked = _picked[qid] ?? const <String>{};
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      if (total > 1)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(L10n.t('سؤال {0} من {1}', [index, total]), style: txt(11, color: D.muted)),
+        ),
+      Text('${q['question'] ?? ''}', style: const TextStyle(color: kFg, height: 1.5)),
+      if (choices.isNotEmpty) ...[
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text(multi ? L10n.t('يمكن اختيار أكثر من إجابة') : L10n.t('اختر إجابة واحدة'),
+              style: txt(11, color: D.muted)),
+        ),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final c in choices)
+              DChoice(
+                label: _plain(c),
+                selected: picked.contains(_plain(c)),
+                recommended: _isRecommended(c),
+                onTap: () => _pick(qid, _plain(c), multi),
+              ),
+          ],
+        ),
+      ],
+      const SizedBox(height: 8),
+      DInput(
+        child: TextField(
+          controller: _ctlFor(qid),
+          style: txt(13.5),
+          cursorColor: D.accent,
+          maxLines: null,
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: L10n.t('إجابة أخرى'),
+            hintStyle: TextStyle(color: D.muted, fontSize: 13.5),
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ),
+    ]);
   }
 }
 
@@ -1731,6 +2316,12 @@ class _ComposerState extends State<Composer> {
         items: store.background,
         onStop: store.stopBackground,
         onDismiss: store.dismissBackground,
+        onOpen: (item) => showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: Colors.transparent,
+          builder: (_) => BackgroundDetailSheet(store: store, item: item),
+        ),
       ),
       DReveal(
         show: store.queued.isNotEmpty,

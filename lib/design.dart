@@ -907,6 +907,93 @@ class DCodeBlock extends StatelessWidget {
   }
 }
 
+/// 工具调用的入参/返回值正文块：头部（标题 + 复制 / 全屏）+ 限高可滚的等宽正文。
+/// 高度必须有上限 —— 一次 execute_code 的返回值可以是几百行，不能撑爆对话。
+class DPayload extends StatelessWidget {
+  const DPayload({
+    super.key,
+    required this.title,
+    required this.text,
+    this.maxHeight = 220,
+    this.onCopy,
+    this.onExpand,
+  });
+
+  final String title;
+  final String text;
+  final double maxHeight;
+  final VoidCallback? onCopy;
+  final VoidCallback? onExpand;
+
+  @override
+  Widget build(BuildContext context) {
+    final body = text.trim();
+    if (body.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(top: 6, bottom: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFF100E0D),
+        borderRadius: BorderRadius.circular(D.rMd),
+        border: Border.all(color: D.borderSoft),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          padding: const EdgeInsetsDirectional.fromSTEB(12, 2, 4, 2),
+          decoration: const BoxDecoration(
+            color: D.surface,
+            border: Border(bottom: BorderSide(color: D.borderSoft)),
+          ),
+          child: Row(children: [
+            Expanded(child: Text(title, style: txt(11.5, color: D.faint, weight: FontWeight.w600, height: 1.2))),
+            if (onExpand != null)
+              _PayloadAction(icon: tb.Maximize.new, label: L10n.t('ملء الشاشة'), onTap: onExpand!),
+            if (onCopy != null)
+              _PayloadAction(icon: tb.Copy.new, label: L10n.t('نسخ'), onTap: onCopy!),
+          ]),
+        ),
+        ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxHeight),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: SelectableText(
+                body,
+                style: txt(11.5, color: D.muted, height: 1.5).copyWith(fontFamily: 'monospace'),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class _PayloadAction extends StatelessWidget {
+  const _PayloadAction({required this.icon, required this.label, required this.onTap});
+  final IconCtor icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: label,
+        child: DPress(
+          onTap: onTap,
+          haptic: Hx.select,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              ic(icon, size: 13.5, color: D.muted),
+              const SizedBox(width: 5),
+              Text(label, style: txt(11, color: D.muted, weight: FontWeight.w500, height: 1.2)),
+            ]),
+          ),
+        ),
+      );
+}
+
 /// Segmented control whose highlight pill slides between options.
 class DSegmented extends StatelessWidget {
   const DSegmented({super.key, required this.options, required this.labels, required this.value, required this.onChanged});
@@ -1286,11 +1373,15 @@ class BackgroundStrip extends StatefulWidget {
     required this.items,
     required this.onStop,
     required this.onDismiss,
+    this.onOpen,
   });
 
   final List<BackgroundActivity> items;
   final Future<void> Function(String id) onStop;
   final void Function(String id) onDismiss;
+
+  /// 点开一行的详情（子代理看 transcript、进程看输出）。空则不显示可点提示。
+  final void Function(BackgroundActivity item)? onOpen;
 
   @override
   State<BackgroundStrip> createState() => _BackgroundStripState();
@@ -1354,20 +1445,26 @@ class _BackgroundStripState extends State<BackgroundStrip> {
         ),
         DCollapse(
           open: open,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-            child: Column(children: [
-              for (final item in items)
-                _BackgroundRow(
-                  item: item,
-                  open: detail.contains(item.id),
-                  onToggle: () => setState(
-                    () => detail.contains(item.id) ? detail.remove(item.id) : detail.add(item.id),
+          // 关键：列表本身要能滚，且**高度必须有上限**。
+          // 这块面板挂在 composer 上方、从底部往上长；不封顶时列表一长，
+          // 面板顶部（收缩按钮）就被顶出屏幕外——点不到了。
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: (MediaQuery.of(context).size.height * 0.42).clamp(120.0, 420.0),
+            ),
+            child: ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              children: [
+                for (final item in items)
+                  _BackgroundRow(
+                    item: item,
+                    onOpen: widget.onOpen == null ? null : () => widget.onOpen!(item),
+                    onStop: () => widget.onStop(item.id),
+                    onDismiss: () => widget.onDismiss(item.id),
                   ),
-                  onStop: () => widget.onStop(item.id),
-                  onDismiss: () => widget.onDismiss(item.id),
-                ),
-            ]),
+              ],
+            ),
           ),
         ),
       ]),
@@ -1378,15 +1475,13 @@ class _BackgroundStripState extends State<BackgroundStrip> {
 class _BackgroundRow extends StatelessWidget {
   const _BackgroundRow({
     required this.item,
-    required this.open,
-    required this.onToggle,
+    required this.onOpen,
     required this.onStop,
     required this.onDismiss,
   });
 
   final BackgroundActivity item;
-  final bool open;
-  final VoidCallback onToggle;
+  final VoidCallback? onOpen;
   final VoidCallback onStop;
   final VoidCallback onDismiss;
 
@@ -1424,7 +1519,6 @@ class _BackgroundRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasDetail = item.detail.trim().isNotEmpty;
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Container(
@@ -1432,14 +1526,15 @@ class _BackgroundRow extends StatelessWidget {
           color: D.surfaceHi.withValues(alpha: 0.55),
           borderRadius: BorderRadius.circular(D.rSm),
         ),
-        child: Column(children: [
-          DPress(
-            scale: 0.99,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(D.rSm),
-              onTap: hasDetail ? onToggle : null,
-              child: Padding(
-                padding: const EdgeInsetsDirectional.fromSTEB(12, 8, 6, 8),
+        child: DPress(
+          scale: 0.99,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(D.rSm),
+            // 整行可点：点开看这条子代理/进程的详情（旧版只有 detail 非空才可点，
+            // 子代理行永远点不开）。
+            onTap: onOpen,
+            child: Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(12, 8, 6, 8),
               child: Row(children: [
                 SizedBox(width: 18, child: Center(child: _glyph)),
                 const SizedBox(width: 10),
@@ -1468,7 +1563,12 @@ class _BackgroundRow extends StatelessWidget {
                     ]),
                   ]),
                 ),
-                const SizedBox(width: 6),
+                if (onOpen != null)
+                  Padding(
+                    padding: const EdgeInsetsDirectional.only(start: 4, end: 2),
+                    child: ic(tb.ChevronRight.new, size: 15, color: D.muted),
+                  ),
+                const SizedBox(width: 2),
                 if (item.running)
                   DIconBtn(
                     icon: tb.PlayerStop.new,
@@ -1484,34 +1584,65 @@ class _BackgroundRow extends StatelessWidget {
                     tooltip: L10n.t('تجاهل'),
                     onPressed: onDismiss,
                   ),
-                ]),
-              ),
+              ]),
             ),
           ),
-          DCollapse(
-            open: open && hasDetail,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-              child: Container(
-                width: double.infinity,
-                constraints: const BoxConstraints(maxHeight: 160),
-                padding: const EdgeInsets.all(9),
-                decoration: BoxDecoration(
-                  color: D.bg.withValues(alpha: 0.6),
-                  borderRadius: BorderRadius.circular(D.rSm),
-                  border: Border.all(color: D.borderSoft),
-                ),
-                child: SingleChildScrollView(
-                  child: Text(
-                    item.detail.trim(),
-                    textDirection: dDirOf(item.detail),
-                    style: txt(11.5, color: D.muted, height: 1.4),
-                  ),
-                ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 可点选的选项（clarify 提问卡用）：选中态实心描边，推荐项带角标。
+/// 跟 DBtn 的区别：没有按压玻璃层，能在一张卡里放很多个而不互相干扰。
+class DChoice extends StatelessWidget {
+  const DChoice({
+    super.key,
+    required this.label,
+    required this.selected,
+    this.recommended = false,
+    this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final bool recommended;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tone = selected ? D.accent : D.borderSoft;
+    return Material(
+      color: selected ? D.accent.withValues(alpha: 0.16) : D.surfaceHi.withValues(alpha: 0.5),
+      borderRadius: BorderRadius.circular(D.rMd),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(D.rMd),
+        onTap: onTap,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 36, maxWidth: 320),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(D.rMd),
+            border: Border.all(color: tone, width: selected ? 1.4 : 1),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (selected) ...[
+              ic(tb.CircleCheck.new, size: 14, color: D.accent),
+              const SizedBox(width: 6),
+            ],
+            Flexible(
+              child: Text(
+                label,
+                textDirection: dDirOf(label),
+                style: txt(13, color: selected ? D.fg : D.muted, weight: selected ? FontWeight.w600 : FontWeight.w400),
               ),
             ),
-          ),
-        ]),
+            if (recommended) ...[
+              const SizedBox(width: 6),
+              Text(L10n.t('مُوصى به'), style: txt(10.5, color: D.accent)),
+            ],
+          ]),
+        ),
       ),
     );
   }
