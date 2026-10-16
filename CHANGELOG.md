@@ -1,3 +1,17 @@
+## 1.3.2+6
+
+Seven mobile-client fixes reported on 2026-10-16.
+
+- Clarify answers are sent as `{"answers": {qid: value}}`; the previous frame (`{"answer": ...}`) made the gateway treat every answer as a cancel. The card is now a form: per-question choices (single or `multi_select`), a free-text answer, and an explicit submit button.
+- Tool rows render in order: no more pre-created placeholder bubble, so text that follows a tool call gets its own bubble, and `message.interim` (commentary around tool calls) is no longer dropped.
+- Tool rows keep the full arguments and the return value (live `tool.start`/`tool.complete`, stored `content` in history) with expandable, full-screen and copyable payloads.
+- Background activity panel is height-capped and scrolls internally, so the collapse control stays reachable; every row opens a detail sheet (subagents poll `subagent.tail` for their live transcript).
+- Always-visible transcript scrollbar plus a jump-to-latest button.
+- Diagnostics panel (long-press the top-bar title): chronological server events/requests and outgoing frames, secrets redacted.
+- Offline demo mode (`--dart-define=HERMES_DEMO=true`) for reviewing the UI without a gateway.
+
+`flutter analyze`: 0 issues · `flutter test`: 137 passed.
+
 # Changelog
 
 ## 1.3.1
