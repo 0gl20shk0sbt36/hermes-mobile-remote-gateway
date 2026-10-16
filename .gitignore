@@ -60,3 +60,8 @@ key.properties
 *.aab
 /screenshots-raw/
 /dist/
+
+# 本地专用（2026-10-16）：构建目录与本地镜像/内存 tweak 的备份文件
+android/build/
+*.upstream
+*.orig
