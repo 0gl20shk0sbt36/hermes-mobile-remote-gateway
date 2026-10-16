@@ -75,6 +75,8 @@ class L10n {
   };
 
   static const Map<String, String> _ar = <String, String>{
+  'أرشفة': 'أرشفة',
+  'جديد': 'جديد',
   'أجب على سؤال واحد على الأقل': 'أجب على سؤال واحد على الأقل',
   '{0} أسئلة': '{0} أسئلة',
   'دائمًا': 'دائمًا',
@@ -347,6 +349,8 @@ class L10n {
   };
 
   static const Map<String, String> _zh = <String, String>{
+  'أرشفة': '归档',
+  'جديد': '新建',
   'أجب على سؤال واحد على الأقل': '请至少回答一个问题',
   '{0} أسئلة': '共 {0} 个问题',
   'دائمًا': '始终允许',
@@ -619,6 +623,8 @@ class L10n {
   };
 
   static const Map<String, String> _en = <String, String>{
+  'أرشفة': 'Archive',
+  'جديد': 'New',
   'أجب على سؤال واحد على الأقل': 'Answer at least one question',
   '{0} أسئلة': '{0} questions',
   'دائمًا': 'Always',

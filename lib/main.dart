@@ -845,7 +845,8 @@ class TopBar extends StatelessWidget {
         ),
         if (store.sid != null)
           _BarBtn(
-            icon: tb.DoorExit.new,
+            icon: tb.Archive.new,
+            label: L10n.t('أرشفة'),
             tooltip: L10n.t('إغلاق الجلسة على الجوال'),
             onPressed: () async {
               final ok = await showDDialog<bool>(context, (c) => DDialog(
@@ -861,20 +862,31 @@ class TopBar extends StatelessWidget {
               if (ok == true) store.closeSession();
             },
           ),
-        _BarBtn(icon: tb.Edit.new, tooltip: L10n.t('جلسة جديدة'), onPressed: store.newSession),
+        _BarBtn(
+          icon: tb.Plus.new,
+          label: L10n.t('جديد'),
+          tooltip: L10n.t('جلسة جديدة'),
+          onPressed: store.newSession,
+        ),
       ]),
     );
   }
 }
 
-/// Flat 44px header button: no disc, so the title carries the bar.
+/// Flat header button: no disc, so the title carries the bar.
+/// 带 label 时渲染成"图标 + 文字"的胶囊（顶栏那两个动作图标本身不够达意，2026-10-16）。
 class _BarBtn extends StatelessWidget {
-  const _BarBtn({required this.icon, required this.tooltip, required this.onPressed});
+  const _BarBtn({required this.icon, required this.tooltip, required this.onPressed, this.label});
   final IconCtor icon;
   final String tooltip;
   final VoidCallback onPressed;
+  final String? label;
+
   @override
-  Widget build(BuildContext context) => Tooltip(
+  Widget build(BuildContext context) {
+    final text = label;
+    if (text == null || text.isEmpty) {
+      return Tooltip(
         message: tooltip,
         child: dGlassTap(
           onTap: onPressed,
@@ -885,6 +897,25 @@ class _BarBtn extends StatelessWidget {
           child: SizedBox(width: 44, height: 44, child: Center(child: ic(icon, size: 20, color: D.fg))),
         ),
       );
+    }
+    return Tooltip(
+      message: tooltip,
+      child: dGlassTap(
+        onTap: onPressed,
+        label: tooltip,
+        height: 40,
+        clip: const StadiumBorder(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            ic(icon, size: 17, color: D.fg),
+            const SizedBox(width: 5),
+            Text(text, style: txt(12.5, color: D.fg, weight: FontWeight.w600)),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
 String _when(double ts) {
@@ -1205,6 +1236,10 @@ class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
   bool _awayFromLatest = false;
 
+  /// 用户没在看最新内容时，新内容（新消息、流式文字变长、工具行展开）会把
+  /// 现有内容往上顶 —— 靠"补偿同样的像素"把视线钉在原地（见 _onStore）。
+  bool _dragging = false;
+
   HermesStore get store => widget.store;
   EdgeInsets get insets => widget.insets;
 
@@ -1212,12 +1247,29 @@ class _ChatViewState extends State<ChatView> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    store.addListener(_onStore);
   }
 
   void _onScroll() {
     // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
     final away = _scroll.hasClients && _scroll.offset > 120;
     if (away != _awayFromLatest) setState(() => _awayFromLatest = away);
+  }
+
+  /// 内容变了：记下**变化前**的滚动范围，等这一帧布局完再补回差值。
+  /// 只在"用户不在底部、也没在拖拽"时补 —— 否则会跟用户的手打架。
+  void _onStore() {
+    if (!mounted || !_scroll.hasClients || _dragging) return;
+    final before = _scroll.position.maxScrollExtent;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      final delta = pos.maxScrollExtent - before;
+      // pixels > 40 表示"在看历史（或至少不是贴着底）"，此时才需要钉住视线。
+      if (delta > 0.5 && pos.pixels > 40) {
+        _scroll.jumpTo((pos.pixels + delta).clamp(0.0, pos.maxScrollExtent));
+      }
+    });
   }
 
   void _toLatest() {
@@ -1229,6 +1281,7 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   void dispose() {
+    store.removeListener(_onStore);
     _scroll.dispose();
     super.dispose();
   }
@@ -1305,25 +1358,36 @@ class _ChatViewState extends State<ChatView> {
           thickness: 3.5,
           radius: const Radius.circular(3),
           child: SelectionArea(
-            child: ListView.builder(
-              controller: _scroll,
-              reverse: true,
-              // reverse: the first padding edge is the bottom (composer side).
-              padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
-              itemCount: items.length + extra,
-              itemBuilder: (context, i) {
-                if (extra == 1 && i == 0) return RunningLine(store: store);
-                final it = items[i - extra];
-                // Steps sit tight together; conversation turns get room to breathe.
-                final older = i - extra + 1 < items.length ? items[i - extra + 1] : null;
-                final step = it.kind == 'tool' || it.kind == 'thinking';
-                final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
-                final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
-                return EnterAnim(
-                  key: ObjectKey(it),
-                  child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
-                );
+            child: NotificationListener<ScrollNotification>(
+              // 手指正按着的时候别做像素补偿，否则会跟用户的手打架。
+              onNotification: (n) {
+                if (n is ScrollStartNotification && n.dragDetails != null) {
+                  _dragging = true;
+                } else if (n is ScrollEndNotification) {
+                  _dragging = false;
+                }
+                return false;
               },
+              child: ListView.builder(
+                controller: _scroll,
+                reverse: true,
+                // reverse: the first padding edge is the bottom (composer side).
+                padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
+                itemCount: items.length + extra,
+                itemBuilder: (context, i) {
+                  if (extra == 1 && i == 0) return RunningLine(store: store);
+                  final it = items[i - extra];
+                  // Steps sit tight together; conversation turns get room to breathe.
+                  final older = i - extra + 1 < items.length ? items[i - extra + 1] : null;
+                  final step = it.kind == 'tool' || it.kind == 'thinking';
+                  final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
+                  final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
+                  return EnterAnim(
+                    key: ObjectKey(it),
+                    child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
+                  );
+                },
+              ),
             ),
           ),
         ),

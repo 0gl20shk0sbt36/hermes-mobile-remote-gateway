@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 构建一个 APK 并**当场核验**，然后把产物 + 清单写进 dist/。
 #
-# 用法: tool/build-apk.sh [--abi arm64|x64] [--demo] [--no-copy]
-#   默认: --abi arm64，正式包（不带 HERMES_DEMO）
+# 用法: tool/build-apk.sh [--abi arm64|x64] [--flavor prod|emu] [--demo] [--no-copy]
+#   默认: --abi arm64 --flavor prod（正式包）
+#   --flavor emu 走模拟器 flavor：AndroidManifest 里关掉 Impeller（模拟器必须，见 docs/EMULATOR.md）
 #
 # 这个脚本存在的理由（都是踩过的坑）：
 #   ① 构建与模拟器必须串行（qemu 常驻 3GB，mem-guard 会杀 Gradle daemon）
@@ -11,16 +12,19 @@
 set -euo pipefail
 
 ABI=arm64
+FLAVOR=prod
 DEMO=""
 COPY=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --abi) ABI="$2"; shift 2 ;;
+    --flavor) FLAVOR="$2"; shift 2 ;;
     --demo) DEMO=1; shift ;;
     --no-copy) COPY=0; shift ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
+case "$FLAVOR" in prod|emu) ;; *) echo "--flavor 只能是 prod|emu" >&2; exit 2 ;; esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -42,13 +46,14 @@ VERSION_NAME="$(python3 -c "import re,sys;print(re.search(r'^version:\s*([^+]+)'
 VERSION_CODE="$(python3 -c "import re,sys;print(re.search(r'^version:.*\+(\d+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
 TARGET="android-$ABI"
 SUFFIX=""
+[ "$FLAVOR" = "emu" ] && SUFFIX="-emu"
 DEFINES=()
-[ -n "$DEMO" ] && { SUFFIX="-demo"; DEFINES=(--dart-define=HERMES_DEMO=true); }
+[ -n "$DEMO" ] && { SUFFIX="$SUFFIX-demo"; DEFINES=(--dart-define=HERMES_DEMO=true); }
 
-echo "== 构建 hermes-mobile ${VERSION_NAME}+${VERSION_CODE} (${ABI}${SUFFIX:-})"
-~/selfhosted/mem-guard/heavy flutter build apk --release --target-platform "$TARGET" "${DEFINES[@]}" 2>&1 | tail -2
+echo "== 构建 hermes-mobile ${VERSION_NAME}+${VERSION_CODE} (${ABI} ${FLAVOR}${SUFFIX:-})"
+~/selfhosted/mem-guard/heavy flutter build apk --release --flavor "$FLAVOR" --target-platform "$TARGET" "${DEFINES[@]}" 2>&1 | tail -2
 
-SRC="build/app/outputs/flutter-apk/app-release.apk"
+SRC="build/app/outputs/flutter-apk/app-${FLAVOR}-release.apk"
 [ -f "$SRC" ] || { echo "!! 没有产物: $SRC" >&2; exit 4; }
 
 OUT="dist/hermes-mobile-${VERSION_NAME}-${VERSION_CODE}-${ABI}${SUFFIX}.apk"

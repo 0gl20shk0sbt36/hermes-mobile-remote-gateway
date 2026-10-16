@@ -52,7 +52,9 @@ tool/release.sh /path/to/dir    # 指定投递目录
 
 - **签名必须一致**：`apksigner verify --print-certs` 应等于 `CN=Android Debug`, SHA-256 `55293152…c9703`；
   换签名就只能卸载重装（会丢本地登录态）。
-- **模拟器要 x64 包**（`--abi x64`），手机要 arm64；x64 包在手机上装不上，反之模拟器里能装但一启动就 `UnsatisfiedLinkError`。
+- **模拟器要 x64 包 + `--flavor emu`**（关 Impeller，见 docs/EMULATOR.md），手机要 arm64 + `--flavor prod`；
+  x64 包在手机上装不上，反之模拟器里能装但一启动就 `UnsatisfiedLinkError`。
+- 有了 flavor 之后所有构建都要带 `--flavor`（`tool/*.sh` 与 CI workflow 已同步）。
 - 装完 App 别立刻启动（等 20 秒），否则可能撞 `FlutterJNI is not attached to native`（见 docs/EMULATOR.md）。
 
 ## 提交与推送

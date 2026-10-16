@@ -1,3 +1,22 @@
+## 1.3.4+8
+
+- Reading position is kept while new output arrives: when the transcript is scrolled away from the newest
+  message, the viewport is compensated by the same amount the content grew, so a new tool row or streamed
+  text no longer pushes what you are reading out of view. (A small residual is expected: content outside
+  the viewport is laid out from an estimate.)
+- Duplicate output hardening: a replayed `message.delta` chunk that the streaming bubble already ends with
+  is ignored, `message.complete` never re-adds text already delivered in this turn (interim included), and
+  `session.resume`'s in-flight tail is not appended when the transcript already ends with the same text.
+- Top bar: the session actions are now labelled pills — 「归档」 (release the session from this phone) and
+  「新建」 (new session) — instead of two ambiguous icons (archive box / pencil).
+- Emulator builds are a first-class Gradle flavour: `--flavor emu` disables Impeller via
+  `src/emu/AndroidManifest.xml`; the shipped `prod` flavour is untouched. See docs/EMULATOR.md.
+- `HermesApplication` no longer hands a destroyed engine to a recreated activity (engine lifecycle
+  listener + `FlutterEngineCache` + `isExecutingDart` check), which fixes the
+  `FlutterJNI is not attached to native` crash seen when the APK is installed while the app is starting.
+
+`flutter analyze`: 0 issues · `flutter test`: 145 passed.
+
 ## 1.3.3+7
 
 - Background activity panel no longer flickers: rows now follow the gateway's report. `process.list` keeps

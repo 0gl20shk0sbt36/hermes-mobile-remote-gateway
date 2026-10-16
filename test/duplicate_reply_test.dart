@@ -93,6 +93,49 @@ void main() {
     expect(row.done, isTrue);
   });
 
+
+  // 回归（2026-10-16，用户报"两次输出的问题好像还在"）：
+  // 三种已知的"同一段文字出现两遍"来源，各钉一条。
+  test('a replayed delta chunk is not appended twice', () async {
+    store.items.add(ChatItem.user('go'));
+    ev('message.start');
+    const chunk = '这是一段会被重放的长文本，长度超过去重阈值。';
+    ev('message.delta', {'text': chunk});
+    ev('message.delta', {'text': chunk}); // 重连/重放：同一段又发一遍
+    ev('message.complete', {'text': chunk});
+    await Future<void>.delayed(Duration.zero);
+
+    final replies = store.items.where((i) => i.kind == 'assistant').toList();
+    expect(replies.length, 1);
+    expect(replies.single.text, chunk, reason: '重放的 chunk 不许追加成两遍');
+  });
+
+  test('message.complete does not re-add text an interim already delivered', () async {
+    store.items.add(ChatItem.user('go'));
+    ev('message.start');
+    ev('message.interim', {'text': '结论：一切正常。', 'already_streamed': false});
+    ev('message.complete', {'text': '结论：一切正常。'}); // 同一个答案又来一遍
+    await Future<void>.delayed(Duration.zero);
+
+    final replies = store.items.where((i) => i.kind == 'assistant').toList();
+    expect(replies.length, 1, reason: 'interim 交付过的文字，complete 不许再写一条');
+    expect(replies.single.text, '结论：一切正常。');
+  });
+
+  test('appendInflight does not duplicate the bubble the transcript already has', () async {
+    final items = chatItemsFromResume([
+      {'role': 'user', 'text': 'hi'},
+      {'role': 'assistant', 'text': '正在处理这件事，先读一下文件。'},
+    ]);
+    // 恢复时服务端的 inflight 尾巴常常就是刚落盘的那一段
+    appendInflight(items, {'assistant': '正在处理这件事，先读一下文件。'});
+    expect(items.where((i) => i.kind == 'assistant').length, 1);
+
+    // 真的是新的一段时才该新增
+    appendInflight(items, {'assistant': '好了，做完了。'});
+    expect(items.where((i) => i.kind == 'assistant').length, 2);
+  });
+
   test('a second turn still gets its own bubble', () async {
     store.items.add(ChatItem.user('one'));
     ev('message.start');

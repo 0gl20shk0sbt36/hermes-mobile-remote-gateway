@@ -15,14 +15,17 @@ python3 tool/drive.py long 演示会话  # 长按（打开诊断面板）
    宿主侧软件光栅（SwiftShader/ANGLE/lavapipe）在 Flutter **Impeller** 的渲染负载下会让**模拟器进程**
    SIGSEGV/SIGILL（core dump 实证：RIP 落在它自己 JIT 出来的匿名可执行页，栈上
    `libGLESv2.so → createFrameBuffer → es2GetProcAddress`）。四种子模式 `swangle/swiftshader/lavapipe/software` 全崩。
-2. **App 侧必须"关 Impeller"，而且要写进 `AndroidManifest.xml`**：
+2. **App 侧必须"关 Impeller"** —— 已经做成 Gradle flavor，直接用：
 
-   ```xml
-   <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
+   ```bash
+   flutter build apk --release --flavor emu --target-platform android-x64   # 模拟器包（关 Impeller）
+   flutter build apk --release --flavor prod --target-platform android-arm64 # 正式包（不动）
    ```
 
-   `am start --ez enable-impeller false` 在 **release 包里无效**（logcat 里照样打印
-   `Using the Impeller rendering backend (OpenGLES)`）—— 这一条骗过我一次，别重犯。
+   原因：`am start --ez enable-impeller false` 在 **release 包里无效**（logcat 里照样打印
+   `Using the Impeller rendering backend (OpenGLES)`），只能靠 manifest；而正式包不该改变渲染后端，
+   所以放在 `android/app/src/emu/AndroidManifest.xml`（写 `EnableImpeller=false`）里，由 flavor 决定。
+   ⚠ 有了 flavor 之后**所有**构建都要带 `--flavor`（CI 与 tool/*.sh 已同步）。
 3. **装完等 20 秒再启动**。包替换会让正在启动的 App 的 Activity 重建，此时
    `HermesApplication` 自管的 `FlutterEngine` 会抛
    `RuntimeException: Cannot execute operation because FlutterJNI is not attached to native`

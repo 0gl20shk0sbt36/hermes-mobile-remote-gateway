@@ -963,6 +963,18 @@ class HermesStore extends ChangeNotifier {
     return false;
   }
 
+  /// 本回合（最后一条 user 之后）是否已经有内容完全相同的助手气泡。
+  /// 用来挡住"同一段文字被投递两次"（interim + complete、重连重放等）。
+  bool _turnHasAssistantText(String text) {
+    final want = text.trim();
+    if (want.isEmpty) return false;
+    for (final it in items.reversed) {
+      if (it.kind == 'user') return false;
+      if (it.kind == 'assistant' && it.text.trim() == want) return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------- background
   // Live background work for the open session (desktop parity): the gateway's
   // process registry plus delegated subagents, merged into one strip above the
@@ -1371,6 +1383,11 @@ class HermesStore extends ChangeNotifier {
         final target = _streamTarget();
         if (target == null) {
           items.add(ChatItem.assistant(t)..done = false);
+        } else if (t.length >= 8 && target.text.endsWith(t)) {
+          // 重连/重放会把同一段 delta 再发一遍（"两次输出"的常见来源之一）：
+          // 尾巴已经带了这段，就别再追加。短于 8 字符的不做这个判断，
+          // 免得把模型真的重复写的短片段（如连续两个"。"）吃掉。
+          target.done = false;
         } else {
           target.text += t;
           target.done = false;
@@ -1391,10 +1408,9 @@ class HermesStore extends ChangeNotifier {
             items.removeLast();
           }
         } else if (text.isNotEmpty && !previewed) {
-          // 没有正在流的气泡：只有在跟上一条助手文字不同才新开一条
-          // （否则 response_previewed 之外的重复投递会变成两条一样的）。
-          final prev = items.lastWhere((i) => i.kind == 'assistant', orElse: () => ChatItem.notice(''));
-          if (prev.text.trim() != text.trim()) items.add(ChatItem.assistant(text));
+          // 没有正在流的气泡：本回合任何一条助手文字跟它一样就不再写一遍
+          // （interim 已交付过的那段、或收尾重复投递，都会走到这里）。
+          if (!_turnHasAssistantText(text)) items.add(ChatItem.assistant(text));
         }
         _debounceSessions();
         if (queued.isEmpty) {
@@ -1818,5 +1834,12 @@ void appendInflight(List<ChatItem> items, Object? inflight) {
     }
   }
   final assistant = '${inflight['assistant'] ?? ''}';
-  if (assistant.trim().isNotEmpty) items.add(ChatItem.assistant(assistant));
+  if (assistant.trim().isNotEmpty) {
+    // 别跟已有的最后一条助手气泡重复（重连/恢复时服务端的 inflight 尾巴
+    // 常常就是刚落盘的那一段 —— 旧实现无条件新增，于是同一段话出现两遍）。
+    final lastAssistant = items.lastWhere((i) => i.kind == 'assistant', orElse: () => ChatItem.notice(''));
+    if (lastAssistant.text.trim() != assistant.trim()) {
+      items.add(ChatItem.assistant(assistant));
+    }
+  }
 }

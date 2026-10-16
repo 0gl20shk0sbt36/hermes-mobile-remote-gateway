@@ -32,12 +32,12 @@ SCREEN="${SCREEN:-720x1280}"
 
 VER="$(python3 -c "import re;print(re.search(r'^version:\s*([^+]+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
 CODE="$(python3 -c "import re;print(re.search(r'^version:.*\+(\d+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
-APK="dist/hermes-mobile-${VER}-${CODE}-${ABI}-demo.apk"
+APK="dist/hermes-mobile-${VER}-${CODE}-${ABI}-emu-demo.apk"
 
 if [ "$BUILD" = "1" ]; then
-  bash tool/build-apk.sh --abi "$ABI" --demo --no-copy
+  bash tool/build-apk.sh --abi "$ABI" --flavor emu --demo --no-copy
 fi
-[ -f "$APK" ] || { echo "!! 找不到 $APK（先跑 tool/build-apk.sh --abi $ABI --demo）" >&2; exit 3; }
+[ -f "$APK" ] || { echo "!! 找不到 $APK（先跑 tool/build-apk.sh --abi $ABI --flavor emu --demo）" >&2; exit 3; }
 
 mkdir -p "$TMPDIR/emu-run"
 ( cd "$TMPDIR/emu-run" && ulimit -c unlimited && \

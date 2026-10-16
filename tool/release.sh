@@ -9,16 +9,22 @@ cd "$ROOT"
 OUT_DIR="${1:-$HOME/share/apk/hermes-mobile}"
 mkdir -p "$OUT_DIR"
 
+VER="$(python3 -c "import re;print(re.search(r'^version:\s*([^+]+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
+CODE="$(python3 -c "import re;print(re.search(r'^version:.*\+(\d+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
+
 bash tool/build-apk.sh --abi arm64 --no-copy
 bash tool/build-apk.sh --abi arm64 --demo --no-copy
 
+# 只保留当前版本：交付目录里混着旧版本会让人不知道该装哪个
+rm -f "$OUT_DIR"/hermes-mobile-*.apk "$OUT_DIR"/hermes-mobile-*.json
+
 # 汇总校验（同时给出新旧两种文件名，方便老路径继续可用）
-( cd dist && sha256sum hermes-mobile-*.apk > SHA256SUMS && cat SHA256SUMS )
-cp -f dist/hermes-mobile-*.apk dist/*.json dist/SHA256SUMS "$OUT_DIR/"
+( cd dist && sha256sum "hermes-mobile-${VER}-${CODE}-arm64"*.apk > SHA256SUMS && cat SHA256SUMS )
+# 只拷当前版本的 arm64 产物：dist/ 会累积旧版本与模拟器（emu/x64）包，
+# 全拷进交付目录会让人不知道该装哪个。
+cp -f "dist/hermes-mobile-${VER}-${CODE}-arm64"*.apk "dist/hermes-mobile-${VER}-${CODE}-arm64"*.json       dist/SHA256SUMS "$OUT_DIR/"
 
 # 兼容旧路径（用户手机上一直用的名字）
-VER="$(python3 -c "import re;print(re.search(r'^version:\s*([^+]+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
-CODE="$(python3 -c "import re;print(re.search(r'^version:.*\+(\d+)',open('pubspec.yaml').read(),re.M).group(1).strip())")"
 cp -f "dist/hermes-mobile-${VER}-${CODE}-arm64.apk" "$HOME/share/apk/hermes-mobile-i18n-fixes-arm64.apk"
 cp -f "dist/hermes-mobile-${VER}-${CODE}-arm64-demo.apk" "$HOME/share/apk/hermes-mobile-i18n-fixes-demo-arm64.apk"
 ( cd "$HOME/share/apk" && sha256sum hermes-mobile-i18n-fixes-arm64.apk > hermes-mobile-i18n-fixes-arm64.sha256 \
