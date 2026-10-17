@@ -1,3 +1,18 @@
+## 1.4.2+16
+
+- Adopted the reference model (Flyer Chat's `flutter_chat_ui`, `ChatAnimatedList`): **the transcript's
+  scroll position is never adjusted programmatically except when already at the bottom** (or right after
+  sending). All of the custom pixel-compensation / anchor code is gone — that code was what jumped while
+  you were scrolling, because `ScrollPosition.jumpTo` cancels any scroll activity that is in flight,
+  including a ballistic fling.
+- A "jump back to latest" button now appears ~250 ms after you scroll away (same delay the reference
+  library uses), so it does not flicker during a fling.
+- Behaviour you should see: while reading history, arriving tokens grow the newest bubble and the list
+  simply follows Flutter's reversed-viewport rules — no jumps; if the list is at the bottom it keeps
+  following the newest content on its own.
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
 ## 1.4.1+15
 
 - Fix: corrections no longer fight the user's scrolling. `jumpTo` cancels any in-flight scroll

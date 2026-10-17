@@ -1236,30 +1236,16 @@ class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
   bool _awayFromLatest = false;
 
-  /// 手指正按着。
-  bool _dragging = false;
+  /// 是否贴着最新内容（反列表里 offset≈0）。照 flutter_chat_ui 的做法：
+  /// **内容变化时一概不动滚动**，只有本来就在底部（或刚发消息）才回到底部。
+  bool _atBottom = true;
 
-  /// **任何滚动进行中**（拖动 + 惯性滑动都算）。jumpTo 会 cancel 正在进行的滚动动画，
-  /// 所以只有 `isScrollingNotifier == false`（idle）时才允许纠偏。
-  bool _scrolling = false;
-
-  /// 定位锚：视口最上面那个可见气泡 + 它当时的屏幕 y。
-  /// 内容怎么变（流式变长、一轮结束时列表变短/重排、工具行展开、图片加载）都不用猜像素差，
-  /// 只要在布局后把同一个气泡"按回原来的 y"，视线就绝对不动。
-  final Map<ChatItem, GlobalKey> _itemKeys = {};
-  ChatItem? _anchor;
-  double? _anchorDy;
-
-  /// 兜底：锚点气泡恰好在这次变化里被移除时，用它恢复。
-  double? _restingPixels;
-  int _storeTicks = 0;
+  /// "回到底部"按钮延迟出现（flutter_chat_ui 的 scrollToBottomAppearanceDelay，250ms），
+  /// 避免滑动过程中按钮闪烁。
+  Timer? _jumpBackTimer;
 
   HermesStore get store => widget.store;
   EdgeInsets get insets => widget.insets;
-
-  GlobalKey _keyFor(ChatItem item) => _itemKeys.putIfAbsent(item, GlobalKey.new);
-
-  bool get _atLatest => _scroll.hasClients && _scroll.offset <= 48;
 
   @override
   void initState() {
@@ -1269,113 +1255,52 @@ class _ChatViewState extends State<ChatView> {
   }
 
   void _onScroll() {
+    if (!_scroll.hasClients) return;
     // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
-    final away = _scroll.hasClients && _scroll.offset > 120;
-    if (away != _awayFromLatest) setState(() => _awayFromLatest = away);
-    if (_dragging && _scroll.hasClients) _restingPixels = _scroll.offset;
-  }
-
-  /// 记住"视口最上方那个可见气泡"及其屏幕 y（在下一帧布局前调用）。
-  void _captureAnchor() {
-    if (!_scroll.hasClients) return;
-    final items = store.items;
-    final viewport = _scroll.position.viewportDimension;
-    for (var i = items.length - 1; i >= 0; i--) {
-      final ctx = _itemKeys[items[i]]?.currentContext;
-      final box = ctx?.findRenderObject() as RenderBox?;
-      if (box == null || !box.attached || !box.hasSize) continue;
-      final dy = box.localToGlobal(Offset.zero).dy;
-      if (dy < -4) continue;              // 已经完全在视口上方
-      if (dy > viewport) break;           // 已经到视口下方：后面更靠下，不用再找
-      _anchor = items[i];
-      _anchorDy = dy;
-      return;
+    final offset = _scroll.offset;
+    final atBottom = offset <= 24;
+    if (atBottom != _atBottom) _atBottom = atBottom;
+    final away = offset > 120;
+    if (away && !_awayFromLatest) {
+      _jumpBackTimer?.cancel();
+      _jumpBackTimer = Timer(const Duration(milliseconds: 250), () {
+        if (mounted && _scroll.hasClients && _scroll.offset > 120) {
+          setState(() => _awayFromLatest = true);
+        }
+      });
+    } else if (!away && _awayFromLatest) {
+      _jumpBackTimer?.cancel();
+      setState(() => _awayFromLatest = false);
     }
   }
 
-  /// 布局后把锚点气泡拉回原来的 y。
-  void _restoreAnchor() {
-    final anchor = _anchor;
-    final dy0 = _anchorDy;
-    if (!_scroll.hasClients) return;
-    if (anchor == null || dy0 == null) {
-      final resting = _restingPixels;
-      if (resting != null && (_scroll.offset - resting).abs() > 24) {
-        _scroll.jumpTo(resting.clamp(0.0, _scroll.position.maxScrollExtent));
-      }
-      return;
-    }
-    final ctx = _itemKeys[anchor]?.currentContext;
-    final box = ctx?.findRenderObject() as RenderBox?;
-    if (box == null || !box.attached || !box.hasSize) {
-      final resting = _restingPixels;
-      if (resting != null && (_scroll.offset - resting).abs() > 24) {
-        _scroll.jumpTo(resting.clamp(0.0, _scroll.position.maxScrollExtent));
-      }
-      _anchor = null;
-      _anchorDy = null;
-      return;
-    }
-    final dy1 = box.localToGlobal(Offset.zero).dy;
-    final diff = dy1 - dy0;
-    if (diff.abs() > 0.5) {
-      // reverse 列表里 offset 增大 = 内容下移，所以要把内容上移 diff 就减 offset。
-      final target = (_scroll.offset - diff).clamp(0.0, _scroll.position.maxScrollExtent);
-      _scroll.jumpTo(target);
-    }
-  }
-
-  /// 内容变了：钉住视线。
-  /// * 贴着最新内容（offset≈0）→ 什么都不做，让它自然跟随；
-  /// * 在看历史 → 变化前记锚点，布局后把锚点按回原位（不管内容是变长还是变短）。
-  bool get _busyScrolling {
-    if (!_scroll.hasClients) return true;
-    if (_scroll.position.isScrollingNotifier.value) return true;
-    return _scrolling;
-  }
-
+  /// 内容变了：只在"贴底"时跟随。**不补偿、不 jumpTo** —— 用户在滚或在上方看历史时
+  /// 完全交给 Flutter，这才是 flutter_chat_ui 的行为（jumpTo 会取消进行中的滚动动画）。
   void _onStore() {
     if (!mounted || !_scroll.hasClients) return;
-    // 用户在滚（含惯性）就完全不动：jumpTo 会取消滚动动画，那才是"跳"的来源。
-    if (_busyScrolling) {
-      _anchor = null;
-      _anchorDy = null;
-      return;
+    final items = store.items;
+    final lastIsUser = items.isNotEmpty && items.last.kind == 'user';
+    if (_atBottom && lastIsUser) {
+      // 自己发了一条（或本来在底部）：平滑回到底部。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scroll.hasClients) return;
+        if (_scroll.offset > 0.5) {
+          _scroll.animateTo(0, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+        }
+      });
     }
-    if (_atLatest) {
-      _anchor = null;
-      _anchorDy = null;
-      _restingPixels = 0;
-      return;
-    }
-    _captureAnchor();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      if (_busyScrolling) return;   // 这一帧里用户又开始滚了 → 让给他
-      _restoreAnchor();
-      _restingPixels = _scroll.offset;
-      _captureAnchor(); // 为下一次变化准备
-      if (++_storeTicks % 40 == 0) _pruneKeys();
-    });
-  }
-
-  void _pruneKeys() {
-    final live = Set<ChatItem>.identity()..addAll(store.items);
-    _itemKeys.removeWhere((item, _) => !live.contains(item));
   }
 
   void _toLatest() {
     H.fire(Hx.select);
     if (_scroll.hasClients) {
-      _restingPixels = 0;
-      _anchor = null;
-      _anchorDy = null;
       _scroll.animateTo(0, duration: D.tIn, curve: D.ease);
     }
   }
 
   @override
   void dispose() {
+    _jumpBackTimer?.cancel();
     store.removeListener(_onStore);
     _scroll.dispose();
     super.dispose();
@@ -1456,15 +1381,9 @@ class _ChatViewState extends State<ChatView> {
             child: NotificationListener<ScrollNotification>(
               // 手指正按着的时候别做像素补偿，否则会跟用户的手打架。
               onNotification: (n) {
-                if (n is ScrollStartNotification) {
-                  // 拖动和惯性滑动都会发这个通知；两种都必须当作"用户在滚"。
-                  _scrolling = true;
-                  if (n.dragDetails != null) _dragging = true;
-                } else if (n is ScrollEndNotification) {
-                  _scrolling = false;
-                  _dragging = false;
-                  if (_scroll.hasClients) _restingPixels = _scroll.offset;
-                  _captureAnchor();
+                // 只用于更新"是否贴底"状态；不做任何像素纠正。
+                if (n is ScrollUpdateNotification || n is ScrollEndNotification || n is OverscrollNotification) {
+                  _onScroll();
                 }
                 return false;
               },
@@ -1483,7 +1402,7 @@ class _ChatViewState extends State<ChatView> {
                   final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
                   final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
                   return EnterAnim(
-                    key: _keyFor(it),
+                    key: ObjectKey(it),
                     child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
                   );
                 },
