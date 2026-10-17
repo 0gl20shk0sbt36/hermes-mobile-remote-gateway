@@ -40,6 +40,20 @@ void main() {
       expect(parts.single.media, '/home/yyx/share/inbox/x.txt');
     });
 
+    test('围栏代码块里的 MEDIA 行不算媒体（否则会把代码块切断、渲染出空块）', () {
+      const raw = '发出下面这行：\n```\nMEDIA:/home/yyx/share/inbox/a.apk\n```\n然后校验 sha256';
+      final parts = splitMediaParts(raw);
+      expect(parts.where((p) => p.media != null), isEmpty, reason: '代码块里的是示例，不是指令');
+      expect(parts.single.text, contains('MEDIA:/home/yyx/share/inbox/a.apk'));
+      expect(parts.single.text, contains('sha256'));
+    });
+
+    test('代码块外的 MEDIA 行仍然生效', () {
+      const raw = '示例：\n```\nMEDIA:/example/only.txt\n```\n真正的：\nMEDIA:/real/file.png';
+      final parts = splitMediaParts(raw);
+      expect(parts.where((p) => p.media != null).map((p) => p.media).toList(), ['/real/file.png']);
+    });
+
     test('普通文本原样返回一段', () {
       final parts = splitMediaParts('就是一段话');
       expect(parts.length, 1);

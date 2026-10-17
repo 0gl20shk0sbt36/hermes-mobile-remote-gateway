@@ -3938,20 +3938,38 @@ class _ConnectionEditorPageState extends State<ConnectionEditorPage> {
 /// 只认**独占一行**的写法（行内代码/句中提及不算），这是 agent 输出媒体时的约定。
 List<({String text, String? media})> splitMediaParts(String raw) {
   final out = <({String text, String? media})>[];
-  final re = RegExp(r'^[ \t]*MEDIA:[ \t]*(\S.*)$', multiLine: true);
-  var last = 0;
-  for (final m in re.allMatches(raw)) {
-    final before = raw.substring(last, m.start);
-    if (before.trim().isNotEmpty) out.add((text: before, media: null));
-    out.add((text: '', media: m.group(1)!.trim()));
-    last = m.end;
+  final marker = RegExp(r'^[ \t]*MEDIA:[ \t]*(\S.*)$');
+  final lines = raw.split('\n');
+  // 围栏代码块里的 MEDIA 行不算媒体：否则会把代码块切断，渲染出空块 + 错位（实测踩过）。
+  var inFence = false;
+  var cursor = 0;
+  var segmentStart = 0;
+
+  void closeSegment(int endOffset) {
+    final text = raw.substring(segmentStart, endOffset);
+    if (text.trim().isNotEmpty) out.add((text: text, media: null));
   }
-  final tail = raw.substring(last);
-  if (out.isEmpty) {
-    out.add((text: raw, media: null));
-  } else if (tail.trim().isNotEmpty) {
-    out.add((text: tail, media: null));
+
+  for (var i = 0; i < lines.length; i++) {
+    final line = lines[i];
+    final lineStart = cursor;
+    // 最后一行没有换行符：按实际长度推进，否则 substring 会越界（实测 RangeError）。
+    final nextStart = i < lines.length - 1 ? lineStart + line.length + 1 : lineStart + line.length;
+    cursor = nextStart;
+    final trimmed = line.trimLeft();
+    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    final match = marker.firstMatch(line);
+    if (match == null) continue;
+    closeSegment(lineStart);
+    out.add((text: '', media: match.group(1)!.trim()));
+    segmentStart = cursor;
   }
+  closeSegment(raw.length);
+  if (out.isEmpty) out.add((text: raw, media: null));
   return out;
 }
 

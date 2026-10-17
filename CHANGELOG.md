@@ -1,3 +1,12 @@
+## 1.3.7+11
+
+- Fix: a `MEDIA:<path>` line **inside a fenced code block** is no longer treated as a real attachment.
+  Splitting on it cut the code fence in half, which rendered as an empty code block plus mis-paired
+  fences (the following paragraph fell inside the block) and a phantom media card. The splitter now
+  tracks ```/~~~ fences and only honours `MEDIA:` lines outside them.
+
+`flutter analyze`: 0 issues · `flutter test`: 158 passed.
+
 ## 1.3.6+10
 
 - Files the agent sends (`MEDIA:<path>`) stay where they were written: the marker line is replaced by a
