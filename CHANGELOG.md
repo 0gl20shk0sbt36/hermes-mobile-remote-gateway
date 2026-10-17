@@ -1,3 +1,19 @@
+## 1.5.0+20
+
+- Ported the **web/RN scroll model** to Flutter (no maintained equivalent exists in Flutter):
+  - transcript list is **top-anchored** (`reverse: false`), so appending at the end cannot move content above;
+  - "stick to bottom" only when within 70px of the bottom (the same 70px threshold `use-stick-to-bottom`,
+    the engine behind bolt.new, uses), plus the initial jump to the newest message on open;
+  - older pages (the only case where content really is inserted above) re-anchor by the measured delta —
+    the `firstItemIndex` idea from react-virtuoso / RN's `maintainVisibleContentPosition`.
+- Fixed the real reason the previous attempt looked broken: `store.items` is newest-first, so a top-anchored
+  list has to walk it backwards; without that flip the transcript rendered upside down and new rows landed
+  at the visual top.
+- Regression tests now cover the model: opens at the newest message, a new row while reading history moves
+  nothing (offset and the visible bubble both pinned), streaming likewise, and at-bottom keeps following.
+
+`flutter analyze`: 0 issues · `flutter test`: 166 passed.
+
 ## 1.4.5+19
 
 - Reverted the top-anchored experiment (it lost the "opens at the newest message" behaviour and threw

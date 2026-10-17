@@ -1234,173 +1234,151 @@ class ChatView extends StatefulWidget {
 class _ChatViewState extends State<ChatView> {
   // 常显滚动条：不显示时用户没法判断自己滑到对话的哪个位置了。
   final _scroll = ScrollController();
+
+  /// 移植 use-stick-to-bottom（bolt.new 用的滚动引擎）的模型：
+  /// * 坐标从**顶部**量（reverse: false）⇒ 末尾追加内容物理上不会移动上方内容；
+  /// * `STICK_OFFSET` = 距底 70px 内算"贴着底部"，只有贴底才跟随；
+  /// * 用户往上滚就"脱离跟随"，滚回底部自动恢复。
+  static const double _stickOffset = 70;
+  bool _atBottom = true;
   bool _awayFromLatest = false;
-
-  /// 手指正按着。
-  bool _dragging = false;
-
-  /// **任何滚动进行中**（拖动 + 惯性滑动都算）。jumpTo 会 cancel 正在进行的滚动动画，
-  /// 所以只有 `isScrollingNotifier == false`（idle）时才允许纠偏。
-  bool _scrolling = false;
-
-  /// 定位锚：视口最上面那个可见气泡 + 它当时的屏幕 y。
-  /// 内容怎么变（流式变长、一轮结束时列表变短/重排、工具行展开、图片加载）都不用猜像素差，
-  /// 只要在布局后把同一个气泡"按回原来的 y"，视线就绝对不动。
-  final Map<ChatItem, GlobalKey> _itemKeys = {};
-  ChatItem? _anchor;
-  double? _anchorDy;
-
-  /// 兜底：锚点气泡恰好在这次变化里被移除时，用它恢复。
-  double? _restingPixels;
-  int _storeTicks = 0;
+  Timer? _jumpBackTimer;
+  bool _didInitialJump = false;
 
   HermesStore get store => widget.store;
   EdgeInsets get insets => widget.insets;
-
-  GlobalKey _keyFor(ChatItem item) => _itemKeys.putIfAbsent(item, GlobalKey.new);
-
-  bool get _atLatest => _scroll.hasClients && _scroll.offset <= 48;
 
   @override
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
     store.addListener(_onStore);
+    // 首次布局后落到底部（内容可能在挂载前就已经在 store 里，那样不会收到通知）。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initialJump());
   }
 
-  void _onScroll() {
-    // 反列表：offset 越接近 maxScrollExtent 越靠近"最旧"的一头 → 自动加载更早的消息。
-    if (_scroll.hasClients) {
-      final p = _scroll.position;
-      if (store.hasMoreOlder && !store.loadingOlder && p.maxScrollExtent > 0 &&
-          p.pixels > p.maxScrollExtent - 400) {
-        store.loadOlder();
-      }
-    }
-    // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
-    final away = _scroll.hasClients && _scroll.offset > 120;
-    if (away != _awayFromLatest) setState(() => _awayFromLatest = away);
-    if (_dragging && _scroll.hasClients) _restingPixels = _scroll.offset;
-  }
-
-  /// 记住"视口最上方那个可见气泡"及其屏幕 y（在下一帧布局前调用）。
-  /// ⚠ 反列表里最新项在**底部**，所以不能从末尾往前扫（会立刻判定"在视口下方"），
-  /// 要扫全部可见项，取 dy 最小且仍在视口内的那个。
-  void _captureAnchor() {
-    if (!_scroll.hasClients) return;
-    final viewport = _scroll.position.viewportDimension;
-    final mid = viewport / 2;
-    ChatItem? best;
-    var bestDist = double.infinity;
-    var bestDy = 0.0;
-    for (final it in store.items) {
-      final ctx = _itemKeys[it]?.currentContext;
-      final box = ctx?.findRenderObject() as RenderBox?;
-      if (box == null || !box.attached || !box.hasSize) continue;
-      final dy = box.localToGlobal(Offset.zero).dy;
-      if (dy < -4 || dy > viewport) continue;
-      // 取"最靠近视口中心"的那一条当锚：它不会因为几十像素的位移被回收，
-      // 而"最上面那一条"一移就会滑出视口、context 变 null，补偿随之失效。
-      final dist = (dy + box.size.height / 2 - mid).abs();
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestDy = dy;
-        best = it;
-      }
-    }
-    _anchor = best;
-    _anchorDy = best == null ? null : bestDy;
-  }
-
-  /// 把锚点气泡拉回原来的 y，返回剩余偏差（逐帧收敛用）。
-  double _restoreAnchorTo(ChatItem? anchor, double? dy0) {
-    if (!_scroll.hasClients) return 0;
-    if (anchor == null || dy0 == null) {
-      final resting = _restingPixels;
-      if (resting != null && (_scroll.offset - resting).abs() > 24) {
-        _scroll.jumpTo(resting.clamp(0.0, double.infinity));
-      }
-      return 0;
-    }
-    final ctx = _itemKeys[anchor]?.currentContext;
-    final box = ctx?.findRenderObject() as RenderBox?;
-    if (box == null || !box.attached || !box.hasSize) return 0;
-    final dy1 = box.localToGlobal(Offset.zero).dy;
-    final diff = dy1 - dy0;
-    if (diff.abs() > 0.5) {
-      // 反列表：offset 增大 = 内容下移；要抵消"内容上移 diff"就减 offset。
-      // 不要用当前 maxScrollExtent 夹（此刻还没算进新内容，一夹就把补偿吃掉）。
-      _scroll.jumpTo((_scroll.offset - diff).clamp(0.0, double.infinity));
-    }
-    return diff;
-  }
-
-  /// 内容变了：钉住视线。
-  /// * 贴着最新内容（offset≈0）→ 什么都不做，让它自然跟随；
-  /// * 在看历史 → 变化前记锚点，布局后把锚点按回原位（不管内容是变长还是变短）。
-  bool get _busyScrolling {
-    if (!_scroll.hasClients) return true;
-    if (_scroll.position.isScrollingNotifier.value) return true;
-    return _scrolling;
-  }
-
-  void _onStore() {
+  /// 打开会话时"停在最新一条"：等到内容真正布局出来再跳（最多重试 12 帧）。
+  void _initialJump([int tries = 0]) {
     if (!mounted || !_scroll.hasClients) return;
-    // 用户在滚（含惯性）就完全不动：jumpTo 会取消滚动动画，那才是"跳"的来源。
-    if (_busyScrolling) {
-      _anchor = null;
-      _anchorDy = null;
-      return;
-    }
-    if (_atLatest) {
-      _anchor = null;
-      _anchorDy = null;
-      _restingPixels = 0;
-      return;
-    }
-    // 一轮内容变化要跨多帧才"定稿"（Sliver 对屏幕外是估算布局，maxScrollExtent 会晚一帧
-    // 才把新内容算进去，期间 jumpTo 会被夹住）。所以：**锚点只取一次**，然后逐帧拿同一个
-    // 锚点把位置拉回去，直到偏差收敛（或补满 8 帧）。
-    _captureAnchor();
-    final anchor = _anchor;
-    final dy0 = _anchorDy;
-    var attempts = 0;
-    void converge() {
-      if (!mounted || !_scroll.hasClients) return;
-      if (_busyScrolling) return;   // 用户开始滚了 → 让给他
-      final diff = _restoreAnchorTo(anchor, dy0);
-      _restingPixels = _scroll.offset;
-      attempts++;
-      if (diff.abs() > 0.5 && attempts < 8) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => converge());
-      } else if (++_storeTicks % 40 == 0) {
-        _pruneKeys();
+    final pos = _scroll.position;
+    if (!pos.hasContentDimensions) {
+      if (tries < 12) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _initialJump(tries + 1));
       }
+      return;
     }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) => converge());
+    if (store.items.isEmpty) return;
+    if (pos.maxScrollExtent <= 0) return;
+    _didInitialJump = true;
+    _settleTo(() => _scroll.position.maxScrollExtent);
   }
 
-  void _pruneKeys() {
-    final live = Set<ChatItem>.identity()..addAll(store.items);
-    _itemKeys.removeWhere((item, _) => !live.contains(item));
-  }
-
+  /// 一键回到底部（正序列表里 maxScrollExtent 就是最新）。
   void _toLatest() {
     H.fire(Hx.select);
-    if (_scroll.hasClients) {
-      _restingPixels = 0;
-      _anchor = null;
-      _anchorDy = null;
-      _scroll.animateTo(0, duration: D.tIn, curve: D.ease);
-    }
+    if (!_scroll.hasClients) return;
+    _settleTo(() => _scroll.position.maxScrollExtent);
   }
 
   @override
   void dispose() {
+    _jumpBackTimer?.cancel();
     store.removeListener(_onStore);
     _scroll.dispose();
     super.dispose();
+  }
+
+  bool get _scrollIdle =>
+      _scroll.hasClients && !_scroll.position.isScrollingNotifier.value;
+
+  double get _fromBottom {
+    if (!_scroll.hasClients) return 0;
+    final pos = _scroll.position;
+    if (!pos.hasContentDimensions) return double.infinity;
+    return pos.maxScrollExtent - pos.pixels;
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    _maybeLoadOlder();
+    final near = _fromBottom <= _stickOffset;
+    _atBottom = near;
+    if (!near && !_awayFromLatest) {
+      // 延迟 250ms 再显示按钮（同 flutter_chat_ui 的 scrollToBottomAppearanceDelay）
+      _jumpBackTimer?.cancel();
+      _jumpBackTimer = Timer(const Duration(milliseconds: 250), () {
+        if (mounted && _scroll.hasClients && _fromBottom > _stickOffset) {
+          setState(() => _awayFromLatest = true);
+        }
+      });
+    } else if (near && _awayFromLatest) {
+      _jumpBackTimer?.cancel();
+      setState(() => _awayFromLatest = false);
+    }
+  }
+
+  /// 逐帧收敛到目标（Sliver 的 maxScrollExtent 要晚一帧才算进新内容，跳一次不够）。
+  void _settleTo(double Function() target, {int frames = 4}) {
+    var left = frames;
+    void tick() {
+      if (!mounted || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      if (!pos.hasContentDimensions) return;
+      final want = target();
+      if ((pos.pixels - want).abs() > 0.5 && left-- > 0) {
+        pos.jumpTo(want.clamp(0.0, double.infinity));
+        WidgetsBinding.instance.addPostFrameCallback((_) => tick());
+      }
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => tick());
+  }
+
+  /// 内容变了：只做 use-stick-to-bottom 允许的事。
+  void _onStore() {
+    if (!mounted || !_scroll.hasClients) return;
+    if (store.items.isEmpty) return;
+
+    // ① 首次载入：落到最新（等同"打开就在底部"）。
+    if (!_didInitialJump) {
+      _didInitialJump = true;
+      _settleTo(() => _scroll.position.maxScrollExtent);
+      return;
+    }
+
+    // ② 贴底 → 跟随最新；不贴底 → 一律不动（顶部坐标下追加内容本来就不会移动视线）。
+    if (_atBottom && _scrollIdle) {
+      _settleTo(() => _scroll.position.maxScrollExtent);
+      return;
+    }
+
+    // ③ 头顶前插了更早的一页（历史分页）：按高度差把视线补回来（= RN 的 firstItemIndex 语义）。
+    if (store.olderEpoch != _seenOlderEpoch) {
+      _seenOlderEpoch = store.olderEpoch;
+      final baseline = _prependBaselineMax;
+      _prependBaselineMax = null;
+      if (baseline != null) {
+        _settleTo(() {
+          final grew = _scroll.position.maxScrollExtent - baseline;
+          return _scroll.offset + grew;
+        });
+      }
+    }
+  }
+
+  /// 历史分页：触发前记下 maxScrollExtent，插入完成后用差值补回视线（RN firstItemIndex 语义）。
+  double? _prependBaselineMax;
+  int _seenOlderEpoch = 0;
+
+  void _maybeLoadOlder() {
+    if (!_scroll.hasClients) return;
+    if (!store.hasMoreOlder || store.loadingOlder) return;
+    final pos = _scroll.position;
+    if (!pos.hasContentDimensions) return;
+    // 顶部坐标：越靠近 0 越靠近"最旧"的一头。
+    if (pos.pixels > 400) return;
+    _prependBaselineMax = pos.maxScrollExtent;
+    store.loadOlder();
   }
 
   @override
@@ -1476,40 +1454,33 @@ class _ChatViewState extends State<ChatView> {
           radius: const Radius.circular(3),
           child: SelectionArea(
             child: NotificationListener<ScrollNotification>(
-              // 手指正按着的时候别做像素补偿，否则会跟用户的手打架。
+              // 只维护"是否贴底"与历史分页触发；不做任何像素纠正。
               onNotification: (n) {
-                if (n is ScrollStartNotification) {
-                  // 拖动和惯性滑动都会发这个通知；两种都必须当作"用户在滚"。
-                  _scrolling = true;
-                  if (n.dragDetails != null) _dragging = true;
-                } else if (n is ScrollEndNotification) {
-                  _scrolling = false;
-                  _dragging = false;
-                  if (_scroll.hasClients) _restingPixels = _scroll.offset;
-                  _captureAnchor();
+                if (n is ScrollUpdateNotification ||
+                    n is ScrollEndNotification ||
+                    n is OverscrollNotification) {
+                  _onScroll();
                 }
                 return false;
               },
               child: ListView.builder(
                 controller: _scroll,
-                reverse: true,
-                // reverse: the first padding edge is the bottom (composer side).
+                reverse: false,
+                // 顶部坐标：末尾追加内容不会移动已有内容（use-stick-to-bottom / Web 模型）。
                 padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
                 itemCount: items.length + extra + 1,
                 itemBuilder: (context, i) {
-                  if (extra == 1 && i == 0) return RunningLine(store: store);
-                  final k = i - extra;
-                  if (k >= items.length) {
-                    // 反列表最后一个 index = 视觉最上方 = 最旧的一头：历史分页入口
+                  if (i == 0) {
+                    // 视觉最上方 = 最旧的一头：历史分页入口
                     return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      padding: const EdgeInsets.only(bottom: 12),
                       child: Center(
                         child: store.hasMoreOlder
                             ? (store.loadingOlder
                                 ? const SizedBox(width: 18, height: 18,
                                     child: CircularProgressIndicator(strokeWidth: 2))
                                 : TextButton(
-                                    onPressed: () => store.loadOlder(),
+                                    onPressed: _maybeLoadOlder,
                                     child: Text(L10n.t('تحميل رسائل أقدم'),
                                         style: txt(12.5, color: D.accent)),
                                   ))
@@ -1518,14 +1489,17 @@ class _ChatViewState extends State<ChatView> {
                       ),
                     );
                   }
+                  // items 是**最新在前**（旧版反列表 index 0 = 最新）。
+                  // 正序列表从顶部（最旧）开始画，所以要翻转索引。
+                  final k = items.length - i;
+                  if (k < 0) return RunningLine(store: store);
                   final it = items[k];
-                  // Steps sit tight together; conversation turns get room to breathe.
                   final older = k + 1 < items.length ? items[k + 1] : null;
                   final step = it.kind == 'tool' || it.kind == 'thinking';
                   final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
                   final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
                   return EnterAnim(
-                    key: _keyFor(it),
+                    key: ObjectKey(it),
                     child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
                   );
                 },

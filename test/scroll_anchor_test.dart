@@ -5,11 +5,11 @@ import 'package:hermes_mobile/store.dart';
 
 import 'attachment_delivery_test.dart' show RecordingGateway;
 
-/// 回归：用户往上翻看历史时，底部的新输出不许把视线顶走；贴底时要能跟着最新。
+/// 滚动模型回归（照 use-stick-to-bottom / RN maintainVisibleContentPosition 的语义）：
 ///
-/// 列表是**倒序**（reverse: true，坐标从底部量）：最新气泡在底部，它变长会把上面的内容
-/// 推着走。所以 ChatView 只在"没在滚动（拖动/惯性都不算 = isScrollingNotifier 为 false）、
-/// 且不在底部"时，把增长量补回滚动位置。
+/// * 列表**正序**（顶部坐标）⇒ 末尾追加内容物理上不会移动上方内容；
+/// * 只有"距底 ≤ 70px（贴底）"时才跟随最新；
+/// * 打开会话时落在最新一条。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late RecordingGateway gw;
@@ -24,8 +24,7 @@ void main() {
     gw.close();
   });
 
-  /// 多帧推进：补偿是"逐帧收敛"的（Sliver 的 maxScrollExtent 晚一帧才算进新内容），
-  /// 只 pump 两三帧看不到效果。
+  /// 多帧推进：跟随是逐帧收敛的（Sliver 的 maxScrollExtent 晚一帧才算进新内容）。
   Future<void> settle(WidgetTester tester) async {
     for (var i = 0; i < 12; i++) {
       await tester.pump(const Duration(milliseconds: 16));
@@ -35,23 +34,24 @@ void main() {
   ScrollPosition posOf(WidgetTester tester) =>
       tester.state<ScrollableState>(find.byType(Scrollable).last).position;
 
-  /// 用 `ObjectKey(ChatItem)` 定位"用户正在看的那一条"：与它在列表里的索引无关
-  /// （新增一条会让索引整体偏移，按 index 取就会量到别的气泡）。
+  /// 距底部还有多少像素（正序列表：maxScrollExtent - pixels）。
+  double fromBottom(WidgetTester tester) {
+    final pos = posOf(tester);
+    return pos.maxScrollExtent - pos.pixels;
+  }
+
   Finder tileFinder(ChatItem item) =>
       find.byWidgetPredicate((w) => w is MessageTile && identical(w.item, item));
 
-  /// 取"最靠近屏幕中心"的可见气泡：它一定在视口里，稍许偏移也不会被回收。
-  /// （ListView.builder 只构建可见项，取第一个可见项在偏移后可能已经被回收。）
+  /// 取"最靠近视口中心"的可见气泡（偏移后它不会被回收）。
   ChatItem centeredItem(WidgetTester tester) {
-    final size = tester.getSize(find.byType(ListView));
-    final mid = size.height / 2;
+    final mid = tester.getSize(find.byType(ListView)).height / 2;
     ChatItem? best;
     var bestDist = double.infinity;
     for (final it in store.items) {
       final finder = tileFinder(it);
       if (finder.evaluate().isEmpty) continue;
-      final rect = tester.getRect(finder);
-      final dist = (rect.center.dy - mid).abs();
+      final dist = (tester.getRect(finder).center.dy - mid).abs();
       if (dist < bestDist) {
         bestDist = dist;
         best = it;
@@ -61,12 +61,6 @@ void main() {
     return best;
   }
 
-  Rect tileOf(WidgetTester tester, ChatItem item) {
-    // 按 item 身份找（列表里用的是每项一个 GlobalKey，不是 ObjectKey）。
-    final finder = find.byWidgetPredicate((w) => w is MessageTile && identical(w.item, item));
-    return tester.getRect(finder);
-  }
-
   Future<void> mount(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(420, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -74,22 +68,26 @@ void main() {
     for (var i = 0; i < 30; i++) {
       store.items.add(ChatItem.assistant('第 $i 条消息，内容够长就能把列表撑起来。' * 2));
     }
-    // 真机上 ChatView 挂在 HomePage 的 ListenableBuilder 里；测试照这个结构，
-    // 否则 store 通知不会触发重建，也就量不到"内容变长"。
     await tester.pumpWidget(MaterialApp(
         home: Scaffold(
             body: ListenableBuilder(listenable: store, builder: (_, _) => ChatView(store: store)))));
-
-    await settle(tester);
-    // 往上翻，离开底部（反列表里 offset 越大越靠上）
-    await tester.drag(find.byType(ListView), const Offset(0, 600));
     await settle(tester);
   }
 
-  testWidgets('a new item does not move the reader who is scrolled up', (tester) async {
+  testWidgets('打开会话时停在最新一条（底部）', (tester) async {
     await mount(tester);
+    expect(fromBottom(tester), lessThan(1.0), reason: '一进来就该在最后一条消息处');
+  });
+
+  testWidgets('看历史时新到的内容不移动视线（也不跳）', (tester) async {
+    await mount(tester);
+    await tester.drag(find.byType(ListView), const Offset(0, 600));
+    await settle(tester);
+    expect(fromBottom(tester), greaterThan(200), reason: '前置条件：确实离开了底部');
+
     final reading = centeredItem(tester);
-    final before = tileOf(tester, reading);
+    final beforeRect = tester.getRect(tileFinder(reading));
+    final beforePixels = posOf(tester).pixels;
 
     gw.events.add({
       'type': 'tool.start',
@@ -97,17 +95,21 @@ void main() {
       'payload': {'name': 'terminal', 'tool_id': 't1', 'context': 'df -h /'},
     });
     await settle(tester);
+    debugPrint('DBG items=${store.items.length} idx=${store.items.indexOf(reading)} kinds=${store.items.map((e) => e.kind).toList().sublist(store.items.length - 3)}');
 
-    // 容差 16px：屏幕外的部分按估算布局，补偿量与真实增长量会有一行内的残差。
-    expect((tileOf(tester, reading).top - before.top).abs(), lessThan(16.0),
-        reason: '底部新增内容时，正在看的那条消息不能被顶走');
-    expect(posOf(tester).pixels, greaterThan(40), reason: '补的是偏移，不该把用户拽回底部');
+    expect((posOf(tester).pixels - beforePixels).abs(), lessThan(1.0),
+        reason: '顶部坐标下追加内容不该改变滚动偏移');
+    expect((tester.getRect(tileFinder(reading)).top - beforeRect.top).abs(), lessThan(2.0),
+        reason: '正在看的那条不能移动');
   });
 
-  testWidgets('streaming text does not move the reader either', (tester) async {
+  testWidgets('流式输出同样不移动看历史的人', (tester) async {
     await mount(tester);
+    await tester.drag(find.byType(ListView), const Offset(0, 600));
+    await settle(tester);
+
     final reading = centeredItem(tester);
-    final before = tileOf(tester, reading);
+    final beforeRect = tester.getRect(tileFinder(reading));
 
     for (var i = 0; i < 3; i++) {
       gw.events.add({
@@ -118,16 +120,13 @@ void main() {
       await settle(tester);
     }
 
-    expect(tileOf(tester, reading).top, closeTo(before.top, 2.0),
-        reason: '流式输出同样不许顶走正在看历史的人');
+    expect((tester.getRect(tileFinder(reading)).top - beforeRect.top).abs(), lessThan(2.0),
+        reason: '流式输出不许移动正在看历史的人');
   });
 
-  testWidgets('a reader parked at the bottom keeps following the newest output', (tester) async {
+  testWidgets('贴着底部时跟随最新输出', (tester) async {
     await mount(tester);
-    // 回到底部：反列表里 offset 0 就是最新
-    await tester.drag(find.byType(ListView), const Offset(0, -6000));
-    await settle(tester);
-    expect(posOf(tester).pixels, lessThan(40));
+    expect(fromBottom(tester), lessThan(1.0));
 
     gw.events.add({
       'type': 'tool.start',
@@ -136,6 +135,6 @@ void main() {
     });
     await settle(tester);
 
-    expect(posOf(tester).pixels, lessThan(40), reason: '在底部就应该自然跟随最新');
+    expect(fromBottom(tester), lessThan(40), reason: '贴底就该一直跟着最新');
   });
 }
