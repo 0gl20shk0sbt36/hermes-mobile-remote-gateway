@@ -1,3 +1,17 @@
+## 1.3.8+12
+
+- Fix: tapping a received file did nothing (no chooser, no installer). Three separate causes:
+  1. downloads were written to `getApplicationDocumentsDirectory()` (`…/app_flutter`), which is
+     **not** covered by open_filex's FileProvider (`files/` + `cache/` only) — so the URI could not
+     be opened at all. They now go to `getApplicationSupportDirectory()` (`…/files`).
+  2. `REQUEST_INSTALL_PACKAGES` was missing, so Android 8+ refused to launch the APK installer.
+  3. no `<queries>` entry for `application/vnd.android.package-archive` / `VIEW`, so Android 11+
+     package visibility hid the installer and open_filex reported "no app can open this".
+  APK/PDF now also pass an explicit MIME type, and a failed install shows the real reason instead of
+  staying silent (the user still has to allow "install unknown apps" for Hermes once).
+
+`flutter analyze`: 0 issues · `flutter test`: 158 passed.
+
 ## 1.3.7+11
 
 - Fix: a `MEDIA:<path>` line **inside a fenced code block** is no longer treated as a real attachment.

@@ -3288,15 +3288,24 @@ class _MediaCardState extends State<MediaCard> {
   Future<void> _open() async {
     final b = await _fetch();
     if (b == null) return;
-    final dir = await getApplicationDocumentsDirectory();
+    // 必须存进 FileProvider 覆盖的目录（<data>/files 或 cache）；app_flutter 不在覆盖内，
+    // 存那里会出现"点了没反应/没有应用可打开"。
+    final dir = await getApplicationSupportDirectory();
     final f = File('${dir.path}/received/$name');
     await f.parent.create(recursive: true);
     await f.writeAsBytes(b);
-    final r = await OpenFilex.open(f.path);
+    final lower = name.toLowerCase();
+    // APK 明确给 MIME，系统才会拉起安装器（否则可能被当成未知文件类型）。
+    final type = lower.endsWith('.apk')
+        ? 'application/vnd.android.package-archive'
+        : lower.endsWith('.pdf')
+            ? 'application/pdf'
+            : null;
+    final r = await OpenFilex.open(f.path, type: type);
     if (r.type != ResultType.done && mounted) {
       setState(() {
-        _errKey = 'لا يوجد تطبيق لفتح هذا الملف';
-        _errArgs = const [];
+        _errKey = lower.endsWith('.apk') ? 'تعذر بدء التثبيت: {0}' : 'لا يوجد تطبيق لفتح هذا الملف';
+        _errArgs = lower.endsWith('.apk') ? ['${r.message}'.trim().isEmpty ? '${r.type}' : '${r.message}'] : const [];
         _errRaw = null;
       });
     }
