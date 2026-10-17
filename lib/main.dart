@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:tabler_icons_next/tabler_icons_next.dart' as tb;
+import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
 import 'connections.dart';
@@ -1483,28 +1484,38 @@ class _MessageTileState extends State<MessageTile> {
           ),
         );
       case 'assistant':
-        final media = RegExp(r'MEDIA:\s*(\S[^\n]*)').allMatches(it.text).map((m) => m[1]!.trim()).toList();
-        final body = it.text.replaceAll(RegExp(r'^[ \t]*MEDIA:[^\n]*\n?', multiLine: true), '').trim();
+        // 媒体按原位置渲染：`MEDIA:<path>` 那行原地变成卡片（图片直接内联预览），
+        // 不再把卡片统一挪到消息末尾（用户 2026-10-16 要求）。
+        final parts = splitMediaParts(it.text);
+        final plain = parts.where((p) => p.media == null).map((p) => p.text).join('\n').trim();
         return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          if (body.isNotEmpty)
-            GptMarkdownTheme(
-                gptThemeData: _mdTheme,
-                child: GptMarkdown(
-                  body,
-                  textDirection: _dirOf(body),
-                  style: txt(15, height: 1.7),
-                  codeBuilder: (context, name, code, closed) => DCodeBlock(
-                    language: name,
-                    code: code,
-                    onCopy: () => _copy(code),
-                  ),
-                ),
+          for (final part in parts) ...[
+            if (part.media == null)
+              part.text.trim().isEmpty
+                  ? const SizedBox.shrink()
+                  : GptMarkdownTheme(
+                      gptThemeData: _mdTheme,
+                      child: GptMarkdown(
+                        part.text.trim(),
+                        textDirection: _dirOf(part.text),
+                        style: txt(15, height: 1.7),
+                        onLinkTap: (url, title) => _openLink(context, url),
+                        codeBuilder: (context, name, code, closed) => DCodeBlock(
+                          language: name,
+                          code: code,
+                          onCopy: () => _copy(code),
+                        ),
+                      ),
+                    )
+            else
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: MediaCard(path: part.media!, compact: true),
               ),
-          for (final path in media)
-            Padding(padding: const EdgeInsets.only(top: 8), child: MediaCard(path: path)),
-          if (body.isNotEmpty && it.done)
-            DActionRow(textDirection: _dirOf(body), actions: [
-              (tb.Copy.new, L10n.t('نسخ'), () => _copy(body)),
+          ],
+          if (plain.isNotEmpty && it.done)
+            DActionRow(textDirection: _dirOf(plain), actions: [
+              (tb.Copy.new, L10n.t('نسخ'), () => _copy(plain)),
             ]),
         ]);
       case 'thinking':
@@ -3920,5 +3931,52 @@ class _ConnectionEditorPageState extends State<ConnectionEditorPage> {
         ]),
       )),
     );
+  }
+}
+
+/// 把正文按 `MEDIA:<path>` 行切开，保持原顺序（媒体不再被挪到消息末尾）。
+/// 只认**独占一行**的写法（行内代码/句中提及不算），这是 agent 输出媒体时的约定。
+List<({String text, String? media})> splitMediaParts(String raw) {
+  final out = <({String text, String? media})>[];
+  final re = RegExp(r'^[ \t]*MEDIA:[ \t]*(\S.*)$', multiLine: true);
+  var last = 0;
+  for (final m in re.allMatches(raw)) {
+    final before = raw.substring(last, m.start);
+    if (before.trim().isNotEmpty) out.add((text: before, media: null));
+    out.add((text: '', media: m.group(1)!.trim()));
+    last = m.end;
+  }
+  final tail = raw.substring(last);
+  if (out.isEmpty) {
+    out.add((text: raw, media: null));
+  } else if (tail.trim().isNotEmpty) {
+    out.add((text: tail, media: null));
+  }
+  return out;
+}
+
+/// 点链接：只放行 http/https/mailto/tel，交给系统浏览器（App 内不留 WebView）。
+/// 长按仍是选择/复制，短按才打开；gpt_markdown 的链接是 TappableTextSpan，
+/// 点击在段落层解析，不会把文本变成不可选。
+/// 只放行这几种 scheme；其它（intent:/file:/javascript: …）一律不跳。
+Uri? allowedLinkUri(String url) {
+  final uri = Uri.tryParse(url.trim());
+  const allowed = {'http', 'https', 'mailto', 'tel'};
+  if (uri == null || !allowed.contains(uri.scheme.toLowerCase())) return null;
+  return uri;
+}
+
+Future<void> _openLink(BuildContext context, String url) async {
+  final uri = allowedLinkUri(url);
+  if (uri == null) {
+    DFeedback.show(context, L10n.t('تعذر فتح الرابط'));
+    return;
+  }
+  H.fire(Hx.light);
+  try {
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && context.mounted) DFeedback.show(context, L10n.t('تعذر فتح الرابط'));
+  } catch (_) {
+    if (context.mounted) DFeedback.show(context, L10n.t('تعذر فتح الرابط'));
   }
 }

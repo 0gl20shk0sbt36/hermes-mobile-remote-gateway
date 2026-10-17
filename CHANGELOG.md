@@ -1,3 +1,15 @@
+## 1.3.6+10
+
+- Files the agent sends (`MEDIA:<path>`) stay where they were written: the marker line is replaced by a
+  card **in place** instead of every card being collected at the end of the message, and images render
+  inline at that spot. Only a line that is exactly `MEDIA:<path>` counts — a mention inside a sentence or
+  inline code no longer spawns a phantom card (that bug is what made a tap report "file not found").
+- Links are tappable: a short tap opens the system browser (`http`/`https`/`mailto`/`tel` only — other
+  schemes such as `intent:`/`file:`/`javascript:` are refused), while long-press still selects and copies
+  text, because gpt_markdown resolves link taps at paragraph level without taking selection away.
+
+`flutter analyze`: 0 issues · `flutter test`: 156 passed.
+
 ## 1.3.5+9
 
 - The question panel (clarify / approval) can be collapsed: tap the title row to keep just the header
