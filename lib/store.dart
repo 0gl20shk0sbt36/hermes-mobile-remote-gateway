@@ -470,11 +470,13 @@ class HermesStore extends ChangeNotifier {
       final List<ChatItem> next;
       if (rows != null) {
         next = chatItemsFromRest(rows);
+        _noteHistoryRows(rows.length);
       } else {
         // A serve without the REST transcript route: the old full resume.
         final full = await gw.call('session.resume', {'session_id': row.id, 'source': 'mobile'}, const Duration(seconds: 120));
         if (gen != _openGen) return;
         next = chatItemsFromResume(full['messages'] as List?);
+        _noteHistoryRows((full['messages'] as List?)?.length ?? 0);
       }
       final isRunning = r['running'] == true;
       if (isRunning) appendInflight(next, r['inflight']);
@@ -1211,6 +1213,53 @@ class HermesStore extends ChangeNotifier {
   // Events drive `running`; the 4 s active-list poll only corrects it, and only
   // when it is clearly wrong. The server keeps `running` true for a moment after
   // `message.complete` (and reports `starting` while it builds an agent on a
+  /// ── 历史分页（上滑加载更早的消息）────────────────────────────────
+  /// 服务端 `GET /api/sessions/<sid>/messages?limit&offset&order=latest`
+  /// 的 offset 以"数据库消息行"计（不是 chat item 数），所以这里单独记 `_olderOffset`。
+  bool loadingOlder = false;
+  bool hasMoreOlder = true;
+  int _olderOffset = 0;
+
+  /// 打开会话时记下已经载入了多少行（后续 offset 从这里接着翻）。
+  void _noteHistoryRows(int rows) {
+    _olderOffset = rows;
+    hasMoreOlder = rows >= 20;
+  }
+
+  Future<void> loadOlder({int page = 100}) async {
+    if (loadingOlder || !hasMoreOlder) return;
+    final api = currentApi;
+    final id = sid;
+    if (api == null || id == null || id.isEmpty) return;
+    loadingOlder = true;
+    notifyListeners();
+    try {
+      final rows = await api.sessionMessages(id, limit: page, offset: _olderOffset);
+      if (rows.length < page) hasMoreOlder = false;
+      _olderOffset += rows.length;
+      final older = chatItemsFromResume(rows);
+      if (older.isNotEmpty) {
+        // 新页是更早的内容：插到列表头部（列表本身是"旧 → 新"的顺序）。
+        final boundary = items.isNotEmpty ? items.first : null;
+        var merged = older;
+        if (boundary != null) {
+          // 去掉分页边界上的重复项（同角色同文本）。
+          while (merged.isNotEmpty &&
+              merged.last.kind == boundary.kind &&
+              merged.last.text.trim() == boundary.text.trim()) {
+            merged = merged.sublist(0, merged.length - 1);
+          }
+        }
+        items.insertAll(0, merged);
+      }
+    } catch (_) {
+      // 失败就保持原样，下次滑动再试
+    } finally {
+      loadingOlder = false;
+      notifyListeners();
+    }
+  }
+
   /// 补进"别处发来的用户消息"：服务端只广播 assistant 的 message.* ，用户行不广播，
   /// 所以换设备/多客户端时，另一头发的话在本机要主动拉一页 transcript 合并进来。
   DateTime? _lastForeignSync;

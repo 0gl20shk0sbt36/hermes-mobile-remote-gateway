@@ -1256,6 +1256,12 @@ class _ChatViewState extends State<ChatView> {
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
+    // 反列表：offset 越接近 maxScrollExtent 越靠近"最旧"的一头 → 自动加载更早的消息。
+    final pos = _scroll.position;
+    if (store.hasMoreOlder && !store.loadingOlder && pos.maxScrollExtent > 0 &&
+        pos.pixels > pos.maxScrollExtent - 400) {
+      store.loadOlder();
+    }
     // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
     final offset = _scroll.offset;
     final atBottom = offset <= 24;
@@ -1392,12 +1398,33 @@ class _ChatViewState extends State<ChatView> {
                 reverse: true,
                 // reverse: the first padding edge is the bottom (composer side).
                 padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
-                itemCount: items.length + extra,
+                itemCount: items.length + extra + 1,
                 itemBuilder: (context, i) {
                   if (extra == 1 && i == 0) return RunningLine(store: store);
-                  final it = items[i - extra];
+                  final k = i - extra;
+                  if (k >= items.length) {
+                    // 反列表的最后一个索引 = 视觉最上方 = 最旧的一头：历史加载指示。
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: Center(
+                        child: store.hasMoreOlder
+                            ? (store.loadingOlder
+                                ? const SizedBox(
+                                    width: 18, height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2))
+                                : TextButton(
+                                    onPressed: () => store.loadOlder(),
+                                    child: Text(L10n.t('تحميل رسائل أقدم'),
+                                        style: txt(12.5, color: D.accent)),
+                                  ))
+                            : Text(L10n.t('لا توجد رسائل أقدم'),
+                                style: txt(11.5, color: D.faint)),
+                      ),
+                    );
+                  }
+                  final it = items[k];
                   // Steps sit tight together; conversation turns get room to breathe.
-                  final older = i - extra + 1 < items.length ? items[i - extra + 1] : null;
+                  final older = k + 1 < items.length ? items[k + 1] : null;
                   final step = it.kind == 'tool' || it.kind == 'thinking';
                   final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
                   final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));

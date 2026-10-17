@@ -1,3 +1,15 @@
+## 1.4.3+17
+
+- History pagination: the transcript now opens with the newest page and loads older messages on demand —
+  scrolling near the oldest end (or tapping the row at the top) pulls the next page via
+  `GET /api/sessions/<sid>/messages?limit&offset&order=latest`, merges it above the current content and
+  de-duplicates the page boundary. A spinner shows while a page is in flight, and the row says so when
+  there is nothing older left.
+- Because older rows are appended beyond the current scroll extent, the list does not move when a page
+  arrives (same behaviour as the reference chat list's `onEndReached`).
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
 ## 1.4.2+16
 
 - Adopted the reference model (Flyer Chat's `flutter_chat_ui`, `ChatAnimatedList`): **the transcript's

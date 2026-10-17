@@ -159,11 +159,16 @@ class HermesApi {
   /// the transcript source the desktop uses too: `session.resume` with the
   /// full history serialises every message of the whole compression lineage
   /// (megabytes on a long session) and blocks the switch for seconds.
-  Future<List<Map<String, dynamic>>> sessionMessages(String storedId, {int limit = 300}) async {
+  Future<List<Map<String, dynamic>>> sessionMessages(String storedId,
+      {int limit = 300, int offset = 0}) async {
     Future<http.Response> get() => http
         .get(
             Uri.parse('$baseUrl/api/sessions/${Uri.encodeComponent(storedId)}/messages')
-                .replace(queryParameters: {'limit': '$limit', 'order': 'latest'}),
+                .replace(queryParameters: {
+                  'limit': '$limit',
+                  'offset': '$offset',
+                  'order': 'latest',
+                }),
             headers: _headers)
         .timeout(const Duration(seconds: 30));
     var r = await get();
