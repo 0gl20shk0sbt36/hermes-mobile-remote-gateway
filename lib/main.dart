@@ -37,7 +37,6 @@ const kOk = D.ok;
 const kRec = D.danger;
 
 final _auth = LocalAuthentication();
-HermesApi? currentApi;
 
 Future<bool> canUseBiometric() async {
   try {
@@ -1237,12 +1236,26 @@ class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
   bool _awayFromLatest = false;
 
-  /// 用户没在看最新内容时，新内容（新消息、流式文字变长、工具行展开）会把
-  /// 现有内容往上顶 —— 靠"补偿同样的像素"把视线钉在原地（见 _onStore）。
+  /// 手指正按着：不做任何自动纠偏，免得跟用户的手打架。
   bool _dragging = false;
+
+  /// 定位锚：视口最上面那个可见气泡 + 它当时的屏幕 y。
+  /// 内容怎么变（流式变长、一轮结束时列表变短/重排、工具行展开、图片加载）都不用猜像素差，
+  /// 只要在布局后把同一个气泡"按回原来的 y"，视线就绝对不动。
+  final Map<ChatItem, GlobalKey> _itemKeys = {};
+  ChatItem? _anchor;
+  double? _anchorDy;
+
+  /// 兜底：锚点气泡恰好在这次变化里被移除时，用它恢复。
+  double? _restingPixels;
+  int _storeTicks = 0;
 
   HermesStore get store => widget.store;
   EdgeInsets get insets => widget.insets;
+
+  GlobalKey _keyFor(ChatItem item) => _itemKeys.putIfAbsent(item, GlobalKey.new);
+
+  bool get _atLatest => _scroll.hasClients && _scroll.offset <= 48;
 
   @override
   void initState() {
@@ -1255,27 +1268,91 @@ class _ChatViewState extends State<ChatView> {
     // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
     final away = _scroll.hasClients && _scroll.offset > 120;
     if (away != _awayFromLatest) setState(() => _awayFromLatest = away);
+    if (_dragging && _scroll.hasClients) _restingPixels = _scroll.offset;
   }
 
-  /// 内容变了：记下**变化前**的滚动范围，等这一帧布局完再补回差值。
-  /// 只在"用户不在底部、也没在拖拽"时补 —— 否则会跟用户的手打架。
+  /// 记住"视口最上方那个可见气泡"及其屏幕 y（在下一帧布局前调用）。
+  void _captureAnchor() {
+    if (!_scroll.hasClients) return;
+    final items = store.items;
+    final viewport = _scroll.position.viewportDimension;
+    for (var i = items.length - 1; i >= 0; i--) {
+      final ctx = _itemKeys[items[i]]?.currentContext;
+      final box = ctx?.findRenderObject() as RenderBox?;
+      if (box == null || !box.attached || !box.hasSize) continue;
+      final dy = box.localToGlobal(Offset.zero).dy;
+      if (dy < -4) continue;              // 已经完全在视口上方
+      if (dy > viewport) break;           // 已经到视口下方：后面更靠下，不用再找
+      _anchor = items[i];
+      _anchorDy = dy;
+      return;
+    }
+  }
+
+  /// 布局后把锚点气泡拉回原来的 y。
+  void _restoreAnchor() {
+    final anchor = _anchor;
+    final dy0 = _anchorDy;
+    if (!_scroll.hasClients) return;
+    if (anchor == null || dy0 == null) {
+      final resting = _restingPixels;
+      if (resting != null && (_scroll.offset - resting).abs() > 24) {
+        _scroll.jumpTo(resting.clamp(0.0, _scroll.position.maxScrollExtent));
+      }
+      return;
+    }
+    final ctx = _itemKeys[anchor]?.currentContext;
+    final box = ctx?.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached || !box.hasSize) {
+      final resting = _restingPixels;
+      if (resting != null && (_scroll.offset - resting).abs() > 24) {
+        _scroll.jumpTo(resting.clamp(0.0, _scroll.position.maxScrollExtent));
+      }
+      _anchor = null;
+      _anchorDy = null;
+      return;
+    }
+    final dy1 = box.localToGlobal(Offset.zero).dy;
+    final diff = dy1 - dy0;
+    if (diff.abs() > 0.5) {
+      // reverse 列表里 offset 增大 = 内容下移，所以要把内容上移 diff 就减 offset。
+      final target = (_scroll.offset - diff).clamp(0.0, _scroll.position.maxScrollExtent);
+      _scroll.jumpTo(target);
+    }
+  }
+
+  /// 内容变了：钉住视线。
+  /// * 贴着最新内容（offset≈0）→ 什么都不做，让它自然跟随；
+  /// * 在看历史 → 变化前记锚点，布局后把锚点按回原位（不管内容是变长还是变短）。
   void _onStore() {
     if (!mounted || !_scroll.hasClients || _dragging) return;
-    final before = _scroll.position.maxScrollExtent;
+    if (_atLatest) {
+      _anchor = null;
+      _anchorDy = null;
+      _restingPixels = 0;
+      return;
+    }
+    _captureAnchor();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      final pos = _scroll.position;
-      final delta = pos.maxScrollExtent - before;
-      // pixels > 40 表示"在看历史（或至少不是贴着底）"，此时才需要钉住视线。
-      if (delta > 0.5 && pos.pixels > 40) {
-        _scroll.jumpTo((pos.pixels + delta).clamp(0.0, pos.maxScrollExtent));
-      }
+      _restoreAnchor();
+      _restingPixels = _scroll.offset;
+      _captureAnchor(); // 为下一次变化准备
+      if (++_storeTicks % 40 == 0) _pruneKeys();
     });
+  }
+
+  void _pruneKeys() {
+    final live = Set<ChatItem>.identity()..addAll(store.items);
+    _itemKeys.removeWhere((item, _) => !live.contains(item));
   }
 
   void _toLatest() {
     H.fire(Hx.select);
     if (_scroll.hasClients) {
+      _restingPixels = 0;
+      _anchor = null;
+      _anchorDy = null;
       _scroll.animateTo(0, duration: D.tIn, curve: D.ease);
     }
   }
@@ -1366,6 +1443,8 @@ class _ChatViewState extends State<ChatView> {
                   _dragging = true;
                 } else if (n is ScrollEndNotification) {
                   _dragging = false;
+                  if (_scroll.hasClients) _restingPixels = _scroll.offset;
+                  _captureAnchor();
                 }
                 return false;
               },
@@ -1384,7 +1463,7 @@ class _ChatViewState extends State<ChatView> {
                   final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
                   final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
                   return EnterAnim(
-                    key: ObjectKey(it),
+                    key: _keyFor(it),
                     child: RepaintBoundary(child: Padding(padding: EdgeInsets.only(top: gap), child: MessageTile(item: it))),
                   );
                 },
@@ -3305,7 +3384,7 @@ class _MediaCardState extends State<MediaCard> {
     if (r.type != ResultType.done && mounted) {
       setState(() {
         _errKey = lower.endsWith('.apk') ? 'تعذر بدء التثبيت: {0}' : 'لا يوجد تطبيق لفتح هذا الملف';
-        _errArgs = lower.endsWith('.apk') ? ['${r.message}'.trim().isEmpty ? '${r.type}' : '${r.message}'] : const [];
+        _errArgs = lower.endsWith('.apk') ? [r.message.trim().isEmpty ? '${r.type}' : r.message] : const [];
         _errRaw = null;
       });
     }

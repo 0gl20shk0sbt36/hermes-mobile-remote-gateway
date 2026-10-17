@@ -1,3 +1,26 @@
+## 1.4.0+14
+
+- Reworked the transcript's scroll logic around an **anchor** instead of pixel deltas. The viewport's
+  top-most visible bubble is remembered (item + screen y) right before any content change and pushed
+  back to that same y after layout, so the reading position no longer moves when a turn *ends* — the
+  old code only compensated growth, and the end of a turn shrinks the list (the running line disappears,
+  an empty placeholder item is dropped, the streaming text is finalised), which snapped the view to the
+  top. Both directions are now handled by the same rule, and the fallback path (anchor item removed)
+  restores the last resting offset. Item keys are stable per `ChatItem`, so reordering never resets the
+  scroll state.
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.3.9+13
+
+- Multi-device sync: a user message typed on another surface (Windows desktop ↔ phone) now shows up
+  without refreshing. The gateway never broadcast the user's own row, so each client only ever saw
+  its own sends. On this side the app now pulls one page of the transcript when a turn starts (and on
+  `sessions.changed`) and merges the last user row if it isn't already present (dedupe by text, so
+  your own optimistic bubble is not duplicated).
+
+`flutter analyze`: 0 issues (2 info lints) · `flutter test`: 165 passed.
+
 ## 1.3.8+12
 
 - Fix: tapping a received file did nothing (no chooser, no installer). Three separate causes:

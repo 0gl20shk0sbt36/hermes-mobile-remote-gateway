@@ -1211,6 +1211,30 @@ class HermesStore extends ChangeNotifier {
   // Events drive `running`; the 4 s active-list poll only corrects it, and only
   // when it is clearly wrong. The server keeps `running` true for a moment after
   // `message.complete` (and reports `starting` while it builds an agent on a
+  /// 补进"别处发来的用户消息"：服务端只广播 assistant 的 message.* ，用户行不广播，
+  /// 所以换设备/多客户端时，另一头发的话在本机要主动拉一页 transcript 合并进来。
+  DateTime? _lastForeignSync;
+
+  Future<void> syncForeignMessages() async {
+    final api = currentApi;
+    final id = sid;
+    if (api == null || id == null || id.isEmpty) return;
+    final now = clock();
+    if (_lastForeignSync != null && now.difference(_lastForeignSync!) < const Duration(seconds: 2)) return;
+    _lastForeignSync = now;
+    try {
+      final rows = await api.sessionMessages(id, limit: 20);
+      final text = lastUserText(rows);
+      if (text == null || text.isEmpty) return;
+      if (!needsForeignUser(items, text)) return;
+      // 只追加到末尾：此时上一轮已经结束，新的一轮 assistant 内容会接在它后面。
+      items.add(ChatItem.user(text));
+      notifyListeners();
+    } catch (_) {
+      // 拉不到就算了，不打断当前流
+    }
+  }
+
   // plain resume), so trusting a single poll pinned the chat as running forever.
 
   /// Clock for the running-state guards (tests move it).
@@ -1267,6 +1291,8 @@ class HermesStore extends ChangeNotifier {
       _trace('← $type ${_brief(e['payload'])}');
     }
     if (type == 'sessions.changed') {
+      final changed = '${payload['session_id'] ?? ''}';
+      if (changed.isEmpty || changed == sid) unawaited(syncForeignMessages());
       _debounceSessions();
       return;
     }
@@ -1328,6 +1354,7 @@ class HermesStore extends ChangeNotifier {
         // 气泡改由第一条 message.delta 现场创建，位置就是它真正该在的时间点。
         running = true;
         _status('يفكر...');
+        unawaited(syncForeignMessages());
       case 'thinking.delta':
         // Spinner rewrites ("(◔_◔) ruminating...") and provider-wait notices,
         // not reasoning: status line only (desktop does the same). Treating
@@ -1842,4 +1869,34 @@ void appendInflight(List<ChatItem> items, Object? inflight) {
       items.add(ChatItem.assistant(assistant));
     }
   }
+}
+
+
+/// transcript 行里最后一条 user 消息的文本（没有则 null）。纯函数，便于单测。
+String? lastUserText(List<Map<String, dynamic>> rows) {
+  for (final row in rows.reversed) {
+    if ('${row['role']}' != 'user') continue;
+    final content = row['content'];
+    final text = content is String
+        ? content
+        : content is List
+            ? content
+                .map((part) => part is Map
+                    ? '${part['text'] ?? ''}'
+                    : part is String
+                        ? part
+                        : '')
+                .join()
+            : '${row['text'] ?? ''}';
+    final trimmed = text.trim();
+    if (trimmed.isNotEmpty) return trimmed;
+  }
+  return null;
+}
+
+/// 这条 user 消息是否还需要补进本地列表（已有同文本就不补）。
+bool needsForeignUser(List<ChatItem> items, String text) {
+  final want = text.trim();
+  if (want.isEmpty) return false;
+  return !items.any((it) => it.kind == 'user' && it.text.trim() == want);
 }

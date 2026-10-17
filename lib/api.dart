@@ -10,6 +10,9 @@ import 'package:http/http.dart' as http;
 import 'connections.dart';
 import 'l10n.dart';
 
+/// 当前连接对应的 HTTP 客户端（下载/历史等走 HTTP 的调用方共用）。
+HermesApi? currentApi;
+
 class AuthError implements Exception {
   AuthError(this.message);
   final String message;
