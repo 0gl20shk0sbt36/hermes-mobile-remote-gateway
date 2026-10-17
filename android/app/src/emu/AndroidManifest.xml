@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+          模拟器专用 flavor（构建时带 flavor=emu）：关掉 Impeller。
+
+          为什么必须写在这里：本机 headless 模拟器上，宿主侧软件光栅
+          （SwiftShader/ANGLE/lavapipe）在 Impeller 的渲染负载下会让「模拟器进程」
+          SIGSEGV/SIGILL（core dump 实证：RIP 落在它自己 JIT 出来的匿名可执行页，
+          栈上 libGLESv2.so → createFrameBuffer → es2GetProcAddress）。
+          而用 am start 传 intent extra 关 Impeller 在 release 包里无效
+          （logcat 里照样打印 Using the Impeller rendering backend (OpenGLES)）。
+
+          正式包（prod）不带这一条：真机走 Impeller，渲染后端与用户设备一致。
+        -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+    </application>
+</manifest>

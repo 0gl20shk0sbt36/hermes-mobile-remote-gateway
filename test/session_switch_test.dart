@@ -11,10 +11,16 @@ class FakeApi extends HermesApi {
   bool fail = false;
 
   @override
-  Future<List<Map<String, dynamic>>> sessionMessages(String storedId, {int limit = 300}) async {
+  Future<List<Map<String, dynamic>>> sessionMessages(String storedId,
+      {int limit = 300, int offset = 0}) async {
     fetches++;
     if (fail) throw 'no route';
-    return transcripts[storedId] ?? [];
+    final all = transcripts[storedId] ?? [];
+    // 分页语义：offset 从最新一端计数。
+    if (offset <= 0) return all.length > limit ? all.sublist(all.length - limit) : all;
+    final end = all.length - offset;
+    if (end <= 0) return [];
+    return all.sublist(end > limit ? end - limit : 0, end);
   }
 }
 

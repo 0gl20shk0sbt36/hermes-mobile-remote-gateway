@@ -33,11 +33,11 @@ jobs:
       - name: Build Android ARM64 APK (development signed)
         env:
           GRADLE_OPTS: -Dorg.gradle.workers.max=2 -Dorg.gradle.jvmargs=-Xmx3g
-        run: flutter build apk --release --target-platform android-arm64
+        run: flutter build apk --release --flavor prod --target-platform android-arm64
       - name: Prepare Android build artifact
         run: |
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk dist/hermes-mobile-development-arm64.apk
+          cp build/app/outputs/flutter-apk/app-prod-release.apk dist/hermes-mobile-development-arm64.apk
           cd dist
           sha256sum hermes-mobile-development-arm64.apk > SHA256SUMS.txt
       - name: Upload Android build
