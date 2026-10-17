@@ -1,3 +1,15 @@
+## 1.4.1+15
+
+- Fix: corrections no longer fight the user's scrolling. `jumpTo` cancels any in-flight scroll
+  activity (`ScrollPosition.jumpTo` docs), so compensating while a drag **or a ballistic fling** was
+  running made the view jump mid-scroll. The old guard only covered a finger-down drag
+  (`ScrollStartNotification.dragDetails != null`); a fling sends the same notification with no drag
+  details. Every correction is now gated on `ScrollPosition.isScrollingNotifier` (true for the whole
+  scroll, idle-only when safe) plus the notification state, so while you are scrolling nothing is
+  touched at all.
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
 ## 1.4.0+14
 
 - Reworked the transcript's scroll logic around an **anchor** instead of pixel deltas. The viewport's

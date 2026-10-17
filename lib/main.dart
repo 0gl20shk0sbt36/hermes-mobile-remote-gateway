@@ -1236,8 +1236,12 @@ class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
   bool _awayFromLatest = false;
 
-  /// 手指正按着：不做任何自动纠偏，免得跟用户的手打架。
+  /// 手指正按着。
   bool _dragging = false;
+
+  /// **任何滚动进行中**（拖动 + 惯性滑动都算）。jumpTo 会 cancel 正在进行的滚动动画，
+  /// 所以只有 `isScrollingNotifier == false`（idle）时才允许纠偏。
+  bool _scrolling = false;
 
   /// 定位锚：视口最上面那个可见气泡 + 它当时的屏幕 y。
   /// 内容怎么变（流式变长、一轮结束时列表变短/重排、工具行展开、图片加载）都不用猜像素差，
@@ -1324,8 +1328,20 @@ class _ChatViewState extends State<ChatView> {
   /// 内容变了：钉住视线。
   /// * 贴着最新内容（offset≈0）→ 什么都不做，让它自然跟随；
   /// * 在看历史 → 变化前记锚点，布局后把锚点按回原位（不管内容是变长还是变短）。
+  bool get _busyScrolling {
+    if (!_scroll.hasClients) return true;
+    if (_scroll.position.isScrollingNotifier.value) return true;
+    return _scrolling;
+  }
+
   void _onStore() {
-    if (!mounted || !_scroll.hasClients || _dragging) return;
+    if (!mounted || !_scroll.hasClients) return;
+    // 用户在滚（含惯性）就完全不动：jumpTo 会取消滚动动画，那才是"跳"的来源。
+    if (_busyScrolling) {
+      _anchor = null;
+      _anchorDy = null;
+      return;
+    }
     if (_atLatest) {
       _anchor = null;
       _anchorDy = null;
@@ -1335,6 +1351,7 @@ class _ChatViewState extends State<ChatView> {
     _captureAnchor();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
+      if (_busyScrolling) return;   // 这一帧里用户又开始滚了 → 让给他
       _restoreAnchor();
       _restingPixels = _scroll.offset;
       _captureAnchor(); // 为下一次变化准备
@@ -1439,9 +1456,12 @@ class _ChatViewState extends State<ChatView> {
             child: NotificationListener<ScrollNotification>(
               // 手指正按着的时候别做像素补偿，否则会跟用户的手打架。
               onNotification: (n) {
-                if (n is ScrollStartNotification && n.dragDetails != null) {
-                  _dragging = true;
+                if (n is ScrollStartNotification) {
+                  // 拖动和惯性滑动都会发这个通知；两种都必须当作"用户在滚"。
+                  _scrolling = true;
+                  if (n.dragDetails != null) _dragging = true;
                 } else if (n is ScrollEndNotification) {
+                  _scrolling = false;
                   _dragging = false;
                   if (_scroll.hasClients) _restingPixels = _scroll.offset;
                   _captureAnchor();
