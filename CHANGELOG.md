@@ -1,3 +1,20 @@
+## 1.4.5+19
+
+- Reverted the top-anchored experiment (it lost the "opens at the newest message" behaviour and threw
+  runtime errors); the list is reversed again, so a session always opens at the bottom.
+- Reading position is now held by a **centre anchor** fed through a **multi-frame convergence loop**:
+  the bubble nearest the viewport centre is remembered before a change and pushed back to the same y on
+  each following frame until the offset settles. Two reasons the earlier attempts failed:
+  1. a `SliverList` only knows the new extent one frame later, so a single `jumpTo` gets clamped and the
+     compensation is silently dropped;
+  2. anchoring on the *top-most* bubble loses its render object as soon as content shifts (it scrolls
+     out and is recycled), so the correction had nothing to measure.
+- Every correction is still gated on `isScrollingNotifier` — nothing is touched while a drag or fling is
+  running.
+- History pagination is wired back onto the reversed list (row at the oldest end, auto-load near it).
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
 ## 1.4.4+18
 
 - The transcript list is now **non-reversed** (top-anchored), which removes the drift instead of
