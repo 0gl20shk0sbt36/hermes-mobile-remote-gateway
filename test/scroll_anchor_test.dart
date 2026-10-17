@@ -5,10 +5,11 @@ import 'package:hermes_mobile/store.dart';
 
 import 'attachment_delivery_test.dart' show RecordingGateway;
 
-/// 回归（2026-10-16）：用户往上翻看历史时，底部的新输出不许把视线顶走。
+/// 回归：用户往上翻看历史时，底部的新输出不许把视线顶走、也不许跳。
 ///
-/// 反列表里正文越长，现有内容的偏移就越大 —— 视口不动就等于"被顶上去"。
-/// 修法是：内容变长时把同样的像素补回滚动位置（ChatView._onStore）。
+/// 现在的模型是**正序列表**（reverse: false，坐标从顶部量）：往末尾追加内容
+/// 从结构上就不会移动已有内容；只有"贴着底部"时才跟随最新。
+/// 注意：正序里 `pixels == maxScrollExtent` 才是底部（旧的反列表里是 0）。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late RecordingGateway gw;
@@ -31,11 +32,14 @@ void main() {
   ScrollPosition posOf(WidgetTester tester) =>
       tester.state<ScrollableState>(find.byType(Scrollable).last).position;
 
-  /// 取当前屏幕上"居中"那条消息的矩形：它就是用户眼睛盯着的地方。
-  Rect midTile(WidgetTester tester) {
-    final n = find.byType(MessageTile).evaluate().length;
-    return tester.getRect(find.byType(MessageTile).at(n ~/ 2));
+  /// 离底部还有多少像素（正序列表）。
+  double fromBottom(WidgetTester tester) {
+    final pos = posOf(tester);
+    return pos.maxScrollExtent - pos.pixels;
   }
+
+  /// 用户正在看的地方 = 滚动偏移。正序列表里"末尾追加内容"不该改变它。
+  /// （不再按 MessageTile 的中间 index 取矩形：新增一项会让 index 漂移，量的就是别的气泡了。）
 
   Future<void> mount(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(420, 900));
@@ -58,7 +62,7 @@ void main() {
 
   testWidgets('a new item does not move the reader who is scrolled up', (tester) async {
     await mount(tester);
-    final before = midTile(tester);
+    final beforePixels = posOf(tester).pixels;
 
     // 新的工具行（= 底部多了一块内容）
     gw.events.add({
@@ -68,16 +72,14 @@ void main() {
     });
     await settle(tester);
 
-    // 容差 16px：列表对"屏幕外"的部分是**估算**布局，补偿量与真实增长量会有约一行的残差；
-    // 关键是别整块跳（修前会跳一整个新内容的量，几十像素起）。
-    expect((midTile(tester).top - before.top).abs(), lessThan(16.0),
-        reason: '底部新增内容时，正在看的那条消息不能整块被顶走');
-    expect(posOf(tester).pixels, greaterThan(40), reason: '补偿只改偏移，不该把用户拽回底部');
+    expect((posOf(tester).pixels - beforePixels).abs(), lessThan(1.0),
+        reason: '末尾追加内容时，看历史的人的滚动位置不能变');
+    expect(fromBottom(tester), greaterThan(40), reason: '不该把用户拽回底部');
   });
 
   testWidgets('streaming text does not move the reader either', (tester) async {
     await mount(tester);
-    final before = midTile(tester);
+    final beforePixels = posOf(tester).pixels;
 
     for (var i = 0; i < 3; i++) {
       gw.events.add({
@@ -88,15 +90,16 @@ void main() {
       await settle(tester);
     }
 
-    expect(midTile(tester).top, closeTo(before.top, 2.0), reason: '流式输出同样不许顶走正在看历史的人');
+    expect(posOf(tester).pixels, closeTo(beforePixels, 1.0),
+        reason: '流式输出同样不许移动正在看历史的人');
   });
 
   testWidgets('a reader parked at the bottom keeps following the newest output', (tester) async {
     await mount(tester);
-    // 回到底部：offset 0 就是最新
-    await tester.drag(find.byType(ListView), const Offset(0, -4000));
+    // 回到底部：正序列表里 maxScrollExtent 就是最新
+    await tester.drag(find.byType(ListView), const Offset(0, -6000));
     await settle(tester);
-    expect(posOf(tester).pixels, lessThan(40));
+    expect(fromBottom(tester), lessThan(40));
 
     gw.events.add({
       'type': 'tool.start',
@@ -104,6 +107,6 @@ void main() {
       'payload': {'name': 'terminal', 'tool_id': 't2', 'context': 'ls'},
     });
     await settle(tester);
-    expect(posOf(tester).pixels, lessThan(40), reason: '在底部就应该自然跟随，不做补偿');
+    expect(fromBottom(tester), lessThan(40), reason: '在底部就应该跟到最新');
   });
 }

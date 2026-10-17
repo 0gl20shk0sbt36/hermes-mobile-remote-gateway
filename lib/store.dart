@@ -1219,6 +1219,8 @@ class HermesStore extends ChangeNotifier {
   bool loadingOlder = false;
   bool hasMoreOlder = true;
   int _olderOffset = 0;
+  /// 每成功插入一页"更早的消息"就 +1；UI 用它区分"头顶增长"（需要补偿）和"末尾增长"（不用管）。
+  int olderEpoch = 0;
 
   /// 打开会话时记下已经载入了多少行（后续 offset 从这里接着翻）。
   void _noteHistoryRows(int rows) {
@@ -1251,6 +1253,7 @@ class HermesStore extends ChangeNotifier {
           }
         }
         items.insertAll(0, merged);
+        olderEpoch++;
       }
     } catch (_) {
       // 失败就保持原样，下次滑动再试

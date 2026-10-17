@@ -1,3 +1,17 @@
+## 1.4.4+18
+
+- The transcript list is now **non-reversed** (top-anchored), which removes the drift instead of
+  compensating for it. In a `reverse: true` list the scroll offset is measured from the bottom, so any
+  growth at the newest end pushes everything above it — every workaround (pixel compensation, anchors,
+  freezing) fought that. Top-anchored, appending at the end cannot move existing content, which is how
+  web chat UIs behave. The list still follows the newest output, but only while it is already at the
+  bottom; the first layout jumps to the bottom once (and older pages, which really are inserted above,
+  re-anchor by the height delta).
+- Older pages still load on scroll-to-top; the page insert is the only case that needs re-anchoring now,
+  and it is tracked explicitly (`store.olderEpoch`).
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
 ## 1.4.3+17
 
 - History pagination: the transcript now opens with the newest page and loads older messages on demand —

@@ -1234,15 +1234,14 @@ class ChatView extends StatefulWidget {
 class _ChatViewState extends State<ChatView> {
   // 常显滚动条：不显示时用户没法判断自己滑到对话的哪个位置了。
   final _scroll = ScrollController();
-  bool _awayFromLatest = false;
 
-  /// 是否贴着最新内容（反列表里 offset≈0）。照 flutter_chat_ui 的做法：
-  /// **内容变化时一概不动滚动**，只有本来就在底部（或刚发消息）才回到底部。
+  /// 列表是**正序**（reverse: false，坐标从顶部量）：往末尾追加内容不会移动已有的内容，
+  /// 所以"看历史时被顶走"从结构上就不存在（这也是网页版/原生 App 的模型）。
+  /// 只有"本来就贴着底部"时才需要跟着往下走。
   bool _atBottom = true;
-
-  /// "回到底部"按钮延迟出现（flutter_chat_ui 的 scrollToBottomAppearanceDelay，250ms），
-  /// 避免滑动过程中按钮闪烁。
+  bool _awayFromLatest = false;
   Timer? _jumpBackTimer;
+  bool _initialJumpDone = false;
 
   HermesStore get store => widget.store;
   EdgeInsets get insets => widget.insets;
@@ -1252,56 +1251,21 @@ class _ChatViewState extends State<ChatView> {
     super.initState();
     _scroll.addListener(_onScroll);
     store.addListener(_onStore);
+    // 首帧布局完成后直接落到最新（正序列表里 = maxScrollExtent）。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToLatestOnce());
   }
 
-  void _onScroll() {
-    if (!_scroll.hasClients) return;
-    // 反列表：offset 越接近 maxScrollExtent 越靠近"最旧"的一头 → 自动加载更早的消息。
-    final pos = _scroll.position;
-    if (store.hasMoreOlder && !store.loadingOlder && pos.maxScrollExtent > 0 &&
-        pos.pixels > pos.maxScrollExtent - 400) {
-      store.loadOlder();
-    }
-    // reverse 列表：offset 0 = 最新（底部）；数值越大越靠上。
-    final offset = _scroll.offset;
-    final atBottom = offset <= 24;
-    if (atBottom != _atBottom) _atBottom = atBottom;
-    final away = offset > 120;
-    if (away && !_awayFromLatest) {
-      _jumpBackTimer?.cancel();
-      _jumpBackTimer = Timer(const Duration(milliseconds: 250), () {
-        if (mounted && _scroll.hasClients && _scroll.offset > 120) {
-          setState(() => _awayFromLatest = true);
-        }
-      });
-    } else if (!away && _awayFromLatest) {
-      _jumpBackTimer?.cancel();
-      setState(() => _awayFromLatest = false);
-    }
-  }
-
-  /// 内容变了：只在"贴底"时跟随。**不补偿、不 jumpTo** —— 用户在滚或在上方看历史时
-  /// 完全交给 Flutter，这才是 flutter_chat_ui 的行为（jumpTo 会取消进行中的滚动动画）。
-  void _onStore() {
+  void _jumpToLatestOnce() {
     if (!mounted || !_scroll.hasClients) return;
-    final items = store.items;
-    final lastIsUser = items.isNotEmpty && items.last.kind == 'user';
-    if (_atBottom && lastIsUser) {
-      // 自己发了一条（或本来在底部）：平滑回到底部。
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_scroll.hasClients) return;
-        if (_scroll.offset > 0.5) {
-          _scroll.animateTo(0, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
-        }
-      });
+    final pos = _scroll.position;
+    if (!pos.hasContentDimensions) {
+      // 还没量出来：下一帧再试
+      WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToLatestOnce());
+      return;
     }
-  }
-
-  void _toLatest() {
-    H.fire(Hx.select);
-    if (_scroll.hasClients) {
-      _scroll.animateTo(0, duration: D.tIn, curve: D.ease);
-    }
+    pos.jumpTo(pos.maxScrollExtent);
+    _initialJumpDone = true;
+    _atBottom = true;
   }
 
   @override
@@ -1310,6 +1274,77 @@ class _ChatViewState extends State<ChatView> {
     store.removeListener(_onStore);
     _scroll.dispose();
     super.dispose();
+  }
+
+  bool get _nearBottom {
+    if (!_scroll.hasClients) return true;
+    final pos = _scroll.position;
+    return pos.maxScrollExtent - pos.pixels <= 32;
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    _atBottom = _nearBottom;
+    final away = !_atBottom;
+    if (away && !_awayFromLatest) {
+      _jumpBackTimer?.cancel();
+      _jumpBackTimer = Timer(const Duration(milliseconds: 250), () {
+        if (mounted && _scroll.hasClients && !_nearBottom) setState(() => _awayFromLatest = true);
+      });
+    } else if (!away && _awayFromLatest) {
+      _jumpBackTimer?.cancel();
+      setState(() => _awayFromLatest = false);
+    }
+  }
+
+  /// 内容变了：
+  /// * 贴着底部 → 跟到底（这一跳是"跟随"，且只在你没滚的时候做）；
+  /// * 在看历史 → **什么都不做**。正序列表里追加在末尾不移动你的视线。
+  int _seenOlderEpoch = 0;
+
+  void _onStore() {
+    if (!mounted || !_scroll.hasClients) return;
+    final pos0 = _scroll.position;
+    final beforeMax = pos0.maxScrollExtent;
+    final wasAtBottom = _nearBottom;
+    // 只有"上面插入了更早的一页"才需要补偿；末尾追加（新的输出）在正序列表里不影响视线。
+    final prepended = store.olderEpoch != _seenOlderEpoch;
+    _seenOlderEpoch = store.olderEpoch;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      if (!_initialJumpDone) {
+        // 首次布局：直接落到最新（打开会话时应该在底部）。
+        _initialJumpDone = true;
+        pos.jumpTo(pos.maxScrollExtent);
+        _atBottom = true;
+        return;
+      }
+      if (wasAtBottom) {
+        // 本来贴底 → 跟着最新内容走。Sliver 对屏幕外是估算布局，跳一次可能不够，补第二次。
+        pos.jumpTo(pos.maxScrollExtent);
+        _atBottom = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scroll.hasClients) return;
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        });
+        return;
+      }
+      if (prepended) {
+        // 头顶插入更早的一页 → 把视线按原来的偏移拉回来。
+        final grew = pos.maxScrollExtent - beforeMax;
+        if (grew.abs() > 1) {
+          pos.jumpTo((pos.pixels + grew).clamp(0.0, pos.maxScrollExtent));
+        }
+      }
+    });
+  }
+
+  void _toLatest() {
+    H.fire(Hx.select);
+    if (_scroll.hasClients) {
+      _scroll.animateTo(_scroll.position.maxScrollExtent, duration: D.tIn, curve: D.ease);
+    }
   }
 
   @override
@@ -1395,17 +1430,16 @@ class _ChatViewState extends State<ChatView> {
               },
               child: ListView.builder(
                 controller: _scroll,
-                reverse: true,
-                // reverse: the first padding edge is the bottom (composer side).
+                reverse: false,
+                // 正序列表：坐标从顶部量。往末尾（最新）追加内容不会移动已有内容，
+                // 所以"看历史被顶走"结构上不存在；只有贴底时才跟随。
                 padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
                 itemCount: items.length + extra + 1,
                 itemBuilder: (context, i) {
-                  if (extra == 1 && i == 0) return RunningLine(store: store);
-                  final k = i - extra;
-                  if (k >= items.length) {
-                    // 反列表的最后一个索引 = 视觉最上方 = 最旧的一头：历史加载指示。
+                  if (i == 0) {
+                    // 最上面那一行 = 更早的历史（加载中 / 可点加载 / 没有了）。
                     return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      padding: const EdgeInsets.only(bottom: 12),
                       child: Center(
                         child: store.hasMoreOlder
                             ? (store.loadingOlder
@@ -1422,9 +1456,11 @@ class _ChatViewState extends State<ChatView> {
                       ),
                     );
                   }
+                  final k = i - 1;
+                  if (k >= items.length) return RunningLine(store: store);
                   final it = items[k];
-                  // Steps sit tight together; conversation turns get room to breathe.
-                  final older = k + 1 < items.length ? items[k + 1] : null;
+                  // 上一条（时间更早的）决定间距：步骤行紧凑，对话轮次留白。
+                  final older = k > 0 ? items[k - 1] : null;
                   final step = it.kind == 'tool' || it.kind == 'thinking';
                   final prevStep = older != null && (older.kind == 'tool' || older.kind == 'thinking');
                   final gap = older == null ? 0.0 : (step && prevStep ? 0.0 : (it.kind == 'user' ? 18.0 : 10.0));
@@ -1438,7 +1474,7 @@ class _ChatViewState extends State<ChatView> {
           ),
         ),
       ),
-      // 往上翻过之后给一个一键回到底部（反列表里 offset 0 就是最新）。
+      // 往上翻过之后给一个一键回到底部（正序列表里 maxScrollExtent 就是最新）。
       if (_awayFromLatest)
         Positioned(
           right: 14,
