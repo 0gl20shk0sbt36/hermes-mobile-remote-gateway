@@ -1696,33 +1696,10 @@ class _SessionView {
 }
 
 /// Chat items from `session.resume`'s server-projected `messages`.
-List<ChatItem> chatItemsFromResume(List? msgs) {
-  final out = <ChatItem>[];
-  for (final m in msgs ?? const []) {
-    final role = m['role'];
-    // 服务端 /api/sessions/<sid>/messages 的行用 `content`；session.resume 里可能给 `text`。
-    // 只读 `text` 会让分页抓回来的整页变成空气泡（实测：100 行 → 50 个空 item）。
-    if (role == 'user') {
-      final (body, files) = splitAttachments('${m['text'] ?? m['content'] ?? m['display_content'] ?? ''}');
-      out.add(ChatItem.user(body)..files = files);
-    } else if (role == 'assistant') {
-      final t = '${m['text'] ?? m['content'] ?? m['display_content'] ?? ''}';
-      if (t.trim().isNotEmpty) out.add(ChatItem.assistant(t));
-    } else if (role == 'tool') {
-      // 工具行要把"完整入参 + 返回值"一起带上，否则展开后只有摘要一行。
-      final args = m['args'] is Map ? (m['args'] as Map).cast<String, dynamic>() : const <String, dynamic>{};
-      out.add(ChatItem.tool(
-        '${m['name'] ?? 'tool'}',
-        detail: '${m['context'] ?? ''}',
-        argsText: m['args_text'] is String && '${m['args_text']}'.trim().isNotEmpty
-            ? '${m['args_text']}'
-            : prettyJson(args),
-        resultText: '${m['result_text'] ?? m['result'] ?? m['output'] ?? m['text'] ?? ''}'.trim(),
-      ));
-    }
-  }
-  return out;
-}
+/// `session.resume` 的 messages 与 REST 历史行共用这套解析：
+/// 认 `text`/`content`，认 `tool_calls`（带 id）与配对的 `role=tool` 行（拿返回值）。
+List<ChatItem> chatItemsFromResume(List? msgs) =>
+    chatItemsFromRest((msgs ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList());
 
 /// JSON 美化（工具入参/返回值都往里走）；解析失败就原样返回。
 String prettyJson(Object? value) {
@@ -1860,6 +1837,16 @@ String _steerText(String text) {
 }
 
 String _toolPreview(Map args) {
+  // clarify：把问题本身当摘要 —— 否则历史里只剩一个 "clarify"，用户看不到问的是什么。
+  final qs = args['questions'];
+  if (qs is List && qs.isNotEmpty && qs.first is Map) {
+    final q = '${(qs.first as Map)['question'] ?? ''}'.trim();
+    if (q.isNotEmpty) return q.length > 80 ? '${q.substring(0, 79)}…' : q;
+  }
+  final single = '${args['question'] ?? ''}'.trim();
+  if (single.isNotEmpty && (args['choices'] != null || args['options'] != null)) {
+    return single.length > 80 ? '${single.substring(0, 79)}…' : single;
+  }
   for (final k in const ['command', 'path', 'file_path', 'query', 'url', 'pattern', 'goal', 'name', 'action', 'image_url', 'urls']) {
     final v = args[k];
     if (v == null) continue;
@@ -1884,7 +1871,7 @@ List<ChatItem> chatItemsFromRest(List<Map<String, dynamic>> rows) {
     final kind = m['display_kind'] as String?;
     if (kind == 'hidden' || kind == 'model_switch' || kind == 'auto_continue') continue;
     if (m['display_content'] != null) continue; // compaction summary
-    final text = _contentText(m['content']);
+    final text = _contentText(m['content'] ?? m['text']);
     if (role == 'user') {
       if (kind == 'process_complete' || kind == 'async_delegation_complete') {
         final meta = m['display_metadata'];
@@ -1916,13 +1903,17 @@ List<ChatItem> chatItemsFromRest(List<Map<String, dynamic>> rows) {
       if (text.trim().isNotEmpty) out.add(ChatItem.assistant(text));
     } else if (role == 'tool') {
       final call = calls['${m['tool_call_id'] ?? ''}'];
-      final name = call?.$1 ?? '${m['tool_name'] ?? 'tool'}';
+      final name = call?.$1 ?? '${m['tool_name'] ?? m['name'] ?? 'tool'}';
+      // 入参优先取 assistant.tool_calls 里的完整 arguments；单行也能靠行内的 args 自洽。
+      final args = call?.$2 ??
+          (m['args'] is Map ? (m['args'] as Map) : const <String, dynamic>{});
+      final argsText = '${m['args_text'] ?? ''}'.trim();
       // content 就是工具返回值原文（旧版本直接丢掉了，只留一行入参摘要）。
       out.add(ChatItem.tool(
         name,
-        detail: call == null ? '' : _toolPreview(call.$2),
-        argsText: call == null ? '' : prettyJson(call.$2),
-        resultText: _contentText(m['content']).trim(),
+        detail: args.isEmpty ? '${m['context'] ?? ''}' : _toolPreview(args),
+        argsText: argsText.isNotEmpty ? argsText : (args.isEmpty ? '' : prettyJson(args)),
+        resultText: _contentText(m['content'] ?? m['result_text'] ?? m['result'] ?? m['output']).trim(),
       ));
     }
   }

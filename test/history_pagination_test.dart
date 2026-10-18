@@ -24,11 +24,18 @@ void main() {
     }
   });
 
-  test('text 字段优先（session.resume 兼容）', () {
+  test('只有 text 字段时也能解析（session.resume 兼容）', () {
     final items = chatItemsFromResume([
-      {'role': 'user', 'text': '来自 text 字段', 'content': '旧字段'},
+      {'role': 'user', 'text': '来自 text 字段'},
     ]);
     expect(items.single.text, '来自 text 字段');
+  });
+
+  test('content 与 text 同时存在时以 content 为准（REST 行）', () {
+    final items = chatItemsFromResume([
+      {'role': 'user', 'content': '权威内容', 'text': '过期副本'},
+    ]);
+    expect(items.single.text, '权威内容');
   });
 
   test('tool 行仍然带完整入参与返回值', () {
@@ -44,5 +51,37 @@ void main() {
     expect(items.single.text, 'terminal');
     expect(items.single.argsText, contains('"command"'));
     expect(items.single.resultText, contains('file-a'));
+  });
+
+  // 用户报的问题：历史里看不到"我问过什么" —— clarify 行必须带题目文本。
+  test('clarify 历史行显示题目，并带上回答', () {
+    final items = chatItemsFromResume([
+      {
+        'role': 'assistant',
+        'content': '',
+        'tool_calls': [
+          {
+            'id': 'call_c1',
+            'type': 'function',
+            'function': {
+              'name': 'clarify',
+              'arguments': '{"questions":[{"qid":"q0","question":"清不清缓存？","choices":["先别清","现在就清"]}]}',
+            },
+          },
+        ],
+      },
+      {
+        'role': 'tool',
+        'tool_name': 'clarify',
+        'tool_call_id': 'call_c1',
+        'content': '{"answers":{"q0":"先别清"}}',
+      },
+    ]);
+    expect(items.length, 1);
+    expect(items.single.kind, 'tool');
+    expect(items.single.text, 'clarify');
+    expect(items.single.detail, '清不清缓存？');
+    expect(items.single.argsText, contains('先别清'));
+    expect(items.single.resultText, contains('"q0"'));
   });
 }

@@ -69,6 +69,20 @@ def build_history(n: int):
             "content": f"第 {i} 条假消息。滚动锚定测试用：内容要够长才能把列表撑起来。" * 3,
             "id": i + 1,
         })
+    out.append({
+        "role": "assistant", "content": "", "id": 900,
+        "tool_calls": [{
+            "id": "call_c1", "type": "function",
+            "function": {"name": "clarify", "arguments": json.dumps({
+                "questions": [{"qid": "q0", "question": "清不清缓存？（历史回放用）",
+                               "choices": ["先别清", "现在就清"], "multi_select": False}],
+            }, ensure_ascii=False)},
+        }],
+    })
+    out.append({
+        "role": "tool", "tool_name": "clarify", "tool_call_id": "call_c1", "id": 901,
+        "content": json.dumps({"answers": {"q0": "先别清"}}, ensure_ascii=False),
+    })
     return out
 
 
@@ -225,10 +239,16 @@ class Handler(BaseHTTPRequestHandler):
                 page = hist[start:end]
             else:
                 page = hist[offset:offset + limit]
-            rows = [{
-                "id": m["id"], "role": m["role"], "content": m["content"],
-                "display_kind": "user" if m["role"] == "user" else None,
-            } for m in page]
+            rows = []
+            for m in page:
+                row = {
+                    "id": m["id"], "role": m["role"], "content": m["content"],
+                    "display_kind": "user" if m["role"] == "user" else None,
+                }
+                for k in ("tool_name", "tool_call_id", "tool_calls"):
+                    if m.get(k):
+                        row[k] = m[k]
+                rows.append(row)
             log(f"HTTP history offset={offset} limit={limit} -> {len(rows)}")
             self._json({
                 "session_id": SID,
