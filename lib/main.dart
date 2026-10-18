@@ -22,6 +22,7 @@ import 'glass.dart';
 import 'notify.dart';
 import 'background_connection.dart';
 import 'store.dart';
+import 'trace.dart';
 import 'l10n.dart';
 
 // Hermes Desktop dark tokens (apps/desktop/src/styles.css).
@@ -95,6 +96,8 @@ Future<void> main() async {
     statusBarIconBrightness: Brightness.light,
   ));
   await L10n.restore();
+  // 无条件启动标记：用于确认 logcat 抓取与调试构建生效（正式包也会打这一行，无副作用）。
+  debugPrint('HBOOT trace=$kTrace');
   runApp(const HermesApp());
   Notify.i.init();
 }
@@ -1241,6 +1244,7 @@ class _ChatViewState extends State<ChatView> {
   /// * 用户往上滚就"脱离跟随"，滚回底部自动恢复。
   static const double _stickOffset = 70;
   bool _atBottom = true;
+  int? _lastTracePx;
   bool _awayFromLatest = false;
   Timer? _jumpBackTimer;
   bool _didInitialJump = false;
@@ -1300,6 +1304,23 @@ class _ChatViewState extends State<ChatView> {
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
+    if (kTrace) {
+      final pos = _scroll.position;
+      final nowPx = pos.pixels.round();
+      final changed = (_lastTracePx == null) || (nowPx - _lastTracePx!).abs() >= 3;
+      if (changed) {
+        _lastTracePx = nowPx;
+        htrace('scroll', {
+        'px': pos.pixels.round(),
+        'max': pos.hasContentDimensions ? pos.maxScrollExtent.round() : -1,
+        'vp': pos.viewportDimension.round(),
+        'from': pos.hasContentDimensions ? (_fromBottom).round() : -1,
+        'atBottom': _atBottom,
+          'items': store.items.length,
+          'running': store.running,
+        });
+      }
+    }
     _maybeLoadOlder();
     final near = _fromBottom <= _stickOffset;
     _atBottom = near;
@@ -1338,6 +1359,24 @@ class _ChatViewState extends State<ChatView> {
   void _onStore() {
     if (!mounted || !_scroll.hasClients) return;
     if (store.items.isEmpty) return;
+    if (kTrace) {
+      final pos = _scroll.position;
+      final from = pos.hasContentDimensions ? (pos.maxScrollExtent - pos.pixels) : -1;
+      htrace('store', {
+        'items': store.items.length,
+        'px': pos.pixels.round(),
+        'max': pos.hasContentDimensions ? pos.maxScrollExtent.round() : -1,
+        'from': from.round(),
+        'atBottom': _atBottom,
+        'initialJump': !_didInitialJump,
+        'epoch': store.olderEpoch,
+        'running': store.running,
+      });
+      // 断点：不在底部却仍然发生了内容变化 —— 这正是"看历史被顶走"的场景。
+      if (from > 70 && _didInitialJump) {
+        hbreak('content_changed_while_reading', {'from': from.round(), 'px': pos.pixels.round(), 'max': pos.maxScrollExtent.round()});
+      }
+    }
 
     // ① 首次载入：落到最新（等同"打开就在底部"）。
     if (!_didInitialJump) {

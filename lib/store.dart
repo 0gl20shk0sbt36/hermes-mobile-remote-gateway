@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'api.dart';
+import 'trace.dart';
 import 'background.dart';
 import 'design.dart';
 import 'notify.dart';
@@ -1333,6 +1334,15 @@ class HermesStore extends ChangeNotifier {
 
   void _onEvent(Map<String, dynamic> e) {
     final type = '${e['type']}';
+    if (kTrace) {
+      final pl = (e['payload'] is Map) ? Map<String, dynamic>.from(e['payload'] as Map) : const <String, dynamic>{};
+      htrace('event', {
+        'type': type,
+        'items': items.length,
+        'dlen': '${pl['text'] ?? ''}'.length,
+        'sid': '${pl['session_id'] ?? e['session_id'] ?? ''}',
+      });
+    }
     // Off by default; a diagnostic build passes --dart-define=HERMES_TRACE_EVENTS=true.
     // Logs the event type only, never the payload.
     if (const bool.fromEnvironment('HERMES_TRACE_EVENTS')) debugPrint('EVT $type');

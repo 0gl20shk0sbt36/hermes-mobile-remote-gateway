@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 
 import 'connections.dart';
 import 'l10n.dart';
+import 'trace.dart';
 
 /// 当前连接对应的 HTTP 客户端（下载/历史等走 HTTP 的调用方共用）。
 HermesApi? currentApi;
@@ -429,6 +430,7 @@ class Gateway extends ChangeNotifier {
     final String frame;
     try {
       frame = jsonEncode({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
+      htrace('ws.out', {'method': method, 'len': frame.length});
     } catch (_) {
       return Future.error(RpcError(-3, L10n.t('تعذر ترميز الطلب')));
     }
