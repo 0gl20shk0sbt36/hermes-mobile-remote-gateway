@@ -72,6 +72,20 @@ class BackgroundConnection {
     return result ?? {};
   }
 
+  /// 安装包的版本号（来自 PackageManager，跟 pubspec 的 version 一致），
+  /// 用来自证"装的是哪一版"——之前只能去系统设置里看，容易装错旧包。
+  Future<String> appVersion() async {
+    try {
+      final v = await _channel.invokeMapMethod<String, dynamic>('version');
+      final name = '${v?['name'] ?? ''}';
+      final code = '${v?['code'] ?? ''}';
+      if (name.isEmpty) return '';
+      return code.isEmpty ? name : '$name ($code)';
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> openBatterySettings() => _channel.invokeMethod<void>('batterySettings');
 
   void dispose() {

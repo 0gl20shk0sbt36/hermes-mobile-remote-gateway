@@ -555,6 +555,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final Gateway gw;
   late final HermesStore store;
   final scaffoldKey = GlobalKey<ScaffoldState>();
+  String _appVersion = '';
 
   @override
   void initState() {
@@ -574,6 +575,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     backgroundConnection.onNetworkAvailable = () => unawaited(gw.ensureHealthy());
     backgroundConnection.listen();
+    unawaited(backgroundConnection.appVersion().then((v) {
+      if (mounted && v.isNotEmpty) setState(() => _appVersion = v);
+    }));
     gw.addListener(_backgroundStatus);
     unawaited(_startBackground());
     gw.connect();
@@ -707,7 +711,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       builder: (context, _) => Scaffold(
         key: scaffoldKey,
         backgroundColor: kBg,
-        drawer: SessionsDrawer(store: store, onLogout: widget.onLogout, onBackground: _backgroundSettings, onConnections: widget.onConnections),
+        drawer: SessionsDrawer(store: store, onLogout: widget.onLogout, onBackground: _backgroundSettings, onConnections: widget.onConnections, version: _appVersion),
         drawerEdgeDragWidth: 60,
         drawerScrimColor: Colors.black.withValues(alpha: 0.38),
         // The transcript runs the full height; the top bar and the composer
@@ -948,11 +952,13 @@ String _sourceLabel(String s) => switch (s) {
 
 class SessionsDrawer extends StatefulWidget {
   const SessionsDrawer(
-      {super.key, required this.store, required this.onLogout, this.onBackground, this.onConnections});
+      {super.key, required this.store, required this.onLogout, this.onBackground, this.onConnections, this.version = ''});
   final VoidCallback? onBackground;
   final VoidCallback? onConnections;
   final HermesStore store;
   final VoidCallback onLogout;
+  /// 安装包版本（来自 PackageManager），自证装的是哪一版。
+  final String version;
   @override
   State<SessionsDrawer> createState() => _SessionsDrawerState();
 }
@@ -1206,6 +1212,12 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
               footerBtn(tb.Server2.new, L10n.t('البوابات والاتصال'), widget.onConnections!, value: _connName),
             if (widget.onBackground != null) footerBtn(tb.Bolt.new, L10n.t('الاتصال في الخلفية'), widget.onBackground!),
             footerBtn(tb.Language.new, L10n.t('اللغة'), () => pickLanguage(context), value: L10n.names[L10n.lang]),
+            if (widget.version.isNotEmpty)
+              Padding(
+                padding: const EdgeInsetsDirectional.only(start: 4, top: 2, bottom: 6),
+                child: Text('${L10n.t('الإصدار')} ${widget.version}',
+                    textDirection: TextDirection.ltr, style: txt(11, color: D.faint)),
+              ),
             Row(children: [
               Expanded(child: footerBtn(tb.Logout.new, L10n.t('تسجيل الخروج'), confirmLogout)),
               const BioToggle(),

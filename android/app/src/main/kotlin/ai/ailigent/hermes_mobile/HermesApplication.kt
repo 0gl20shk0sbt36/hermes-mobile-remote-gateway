@@ -86,6 +86,12 @@ class HermesApplication : Application() {
                         result.success(mapOf("running" to GatewayService.running,
                             "batteryExempt" to power.isIgnoringBatteryOptimizations(packageName)))
                     }
+                    "version" -> {
+                        val pi = packageManager.getPackageInfo(packageName, 0)
+                        val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                                   else @Suppress("DEPRECATION") pi.versionCode.toLong()
+                        result.success(mapOf("name" to (pi.versionName ?: ""), "code" to code))
+                    }
                     "batterySettings" -> {
                         startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
