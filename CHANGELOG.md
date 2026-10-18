@@ -1,3 +1,14 @@
+## 1.5.1+21
+
+- **历史分页（"加载更早"）修好了**：REST 历史行用的是 `content` 字段，而 `chatItemsFromResume` 只读 `text`，
+  导致翻页抓回来的整页变成空气泡（实测 100 行 → 50 个空 item，滑到顶整屏空白）。现在 `text`/`content`/`display_content` 都认。
+- 分页前插补偿加护栏：`maxScrollExtent` 是惰性估算，刚插入一页时会从 7.5 万塌到 6 千，
+  照 `offset + grew` 补偿会把视图甩出好几屏（实测 -69874px）。估算不合理时不补偿。
+- 文件卡片的 MIME 按扩展名给全（md/txt/json/zip/图片/音视频…），
+  不再一律 `*/*`（之前点开 .md 会列出"日历/证书安装器"这类无关应用）。
+- 调试基建：`lib/trace.dart` 遥测（debug 构建默认开，release 零开销）、`tool/mockgw.py` 模拟网关、
+  `tool/scenario-e2e.py` 场景驱动；新增 `test/history_pagination_test.dart` 回归。
+
 ## 1.5.0+20
 
 - Ported the **web/RN scroll model** to Flutter (no maintained equivalent exists in Flutter):

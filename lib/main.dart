@@ -1398,7 +1398,21 @@ class _ChatViewState extends State<ChatView> {
       _prependBaselineMax = null;
       if (baseline != null) {
         _settleTo(() {
-          final grew = _scroll.position.maxScrollExtent - baseline;
+          final maxNow = _scroll.position.maxScrollExtent;
+          final grew = maxNow - baseline;
+          // maxScrollExtent 是惰性估算：刚插入一页时可能从 7.5 万塌到 6 千，
+          // 照 grew 补偿会把视图甩出去好几屏。只在"估算还合理"时补偿。
+          final sane = grew > 0 && grew < baseline * 0.8;
+          if (kTrace) {
+            htrace('prepend.compensate', {
+              'baseline': baseline.round(),
+              'max': maxNow.round(),
+              'grew': grew.round(),
+              'offset': _scroll.offset.round(),
+              'sane': sane,
+            });
+          }
+          if (!sane) return _scroll.offset;
           return _scroll.offset + grew;
         });
       }
@@ -3449,12 +3463,7 @@ class _MediaCardState extends State<MediaCard> {
     await f.parent.create(recursive: true);
     await f.writeAsBytes(b);
     final lower = name.toLowerCase();
-    // APK 明确给 MIME，系统才会拉起安装器（否则可能被当成未知文件类型）。
-    final type = lower.endsWith('.apk')
-        ? 'application/vnd.android.package-archive'
-        : lower.endsWith('.pdf')
-            ? 'application/pdf'
-            : null;
+    final type = mimeForName(lower);
     final r = await OpenFilex.open(f.path, type: type);
     if (r.type != ResultType.done && mounted) {
       setState(() {
@@ -4095,6 +4104,52 @@ class _ConnectionEditorPageState extends State<ConnectionEditorPage> {
       )),
     );
   }
+}
+
+
+/// 按扩展名给 MIME：给 `null` 时系统拿到的是 `*/*`，会列出 Photos/日历/证书安装器
+/// 这类完全无关的应用（实测 .md 卡片点开就是这样）。常见类型显式给出，选择器才干净。
+String? mimeForName(String lower) {
+  const map = <String, String>{
+    '.apk': 'application/vnd.android.package-archive',
+    '.pdf': 'application/pdf',
+    '.zip': 'application/zip',
+    '.gz': 'application/gzip',
+    '.tar': 'application/x-tar',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.heic': 'image/heic',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.md': 'text/plain',
+    '.txt': 'text/plain',
+    '.log': 'text/plain',
+    '.json': 'application/json',
+    '.yaml': 'text/plain',
+    '.yml': 'text/plain',
+    '.csv': 'text/csv',
+    '.xml': 'text/xml',
+    '.html': 'text/html',
+    '.sh': 'text/plain',
+    '.py': 'text/plain',
+    '.dart': 'text/plain',
+    '.kt': 'text/plain',
+    '.js': 'text/plain',
+    '.sql': 'text/plain',
+    '.ini': 'text/plain',
+    '.conf': 'text/plain',
+  };
+  for (final e in map.entries) {
+    if (lower.endsWith(e.key)) return e.value;
+  }
+  return null;
 }
 
 /// 把正文按 `MEDIA:<path>` 行切开，保持原顺序（媒体不再被挪到消息末尾）。

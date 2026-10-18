@@ -1241,6 +1241,15 @@ class HermesStore extends ChangeNotifier {
       if (rows.length < page) hasMoreOlder = false;
       _olderOffset += rows.length;
       final older = chatItemsFromResume(rows);
+      if (kTrace) {
+        htrace('older', {
+          'rows': rows.length,
+          'items_before': items.length,
+          'parsed': older.length,
+          'first_parsed': older.isNotEmpty ? older.first.text.replaceAll('\n', ' ').substring(0, older.first.text.length.clamp(0, 24)) : '',
+          'roles': rows.take(6).map((r) => '${r['role']}').join(','),
+        });
+      }
       if (older.isNotEmpty) {
         // 新页是更早的内容：插到列表头部（列表本身是"旧 → 新"的顺序）。
         final boundary = items.isNotEmpty ? items.first : null;
@@ -1255,6 +1264,15 @@ class HermesStore extends ChangeNotifier {
         }
         items.insertAll(0, merged);
         olderEpoch++;
+        if (kTrace) {
+          htrace('older.merged', {
+            'merged': merged.length,
+            'items_after': items.length,
+            'epoch': olderEpoch,
+            'head_empty': items.isEmpty ? -1 : items.first.text.trim().length,
+            'tail_empty': items.isEmpty ? -1 : items.last.text.trim().length,
+          });
+        }
       }
     } catch (_) {
       // 失败就保持原样，下次滑动再试
@@ -1682,11 +1700,13 @@ List<ChatItem> chatItemsFromResume(List? msgs) {
   final out = <ChatItem>[];
   for (final m in msgs ?? const []) {
     final role = m['role'];
+    // 服务端 /api/sessions/<sid>/messages 的行用 `content`；session.resume 里可能给 `text`。
+    // 只读 `text` 会让分页抓回来的整页变成空气泡（实测：100 行 → 50 个空 item）。
     if (role == 'user') {
-      final (body, files) = splitAttachments('${m['text'] ?? ''}');
+      final (body, files) = splitAttachments('${m['text'] ?? m['content'] ?? m['display_content'] ?? ''}');
       out.add(ChatItem.user(body)..files = files);
     } else if (role == 'assistant') {
-      final t = '${m['text'] ?? ''}';
+      final t = '${m['text'] ?? m['content'] ?? m['display_content'] ?? ''}';
       if (t.trim().isNotEmpty) out.add(ChatItem.assistant(t));
     } else if (role == 'tool') {
       // 工具行要把"完整入参 + 返回值"一起带上，否则展开后只有摘要一行。

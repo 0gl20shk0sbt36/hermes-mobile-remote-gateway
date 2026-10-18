@@ -153,6 +153,27 @@ class Handler(BaseHTTPRequestHandler):
             self._broadcast({"type": "message.complete", "session_id": SID, "payload": {"text": text}})
             self._json({"ok": True, "items": len(STATE["history"])})
             return
+        if path == "/ctl/tools":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            n = int((q.get("n") or ["2"])[0])
+            threading.Thread(target=self._stream_tools, args=(n,), daemon=True).start()
+            self._json({"ok": True, "tools": n})
+            return
+        if path == "/ctl/media":
+            self._media()
+            self._json({"ok": True})
+            return
+        if path == "/ctl/foreign":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            text = (q.get("text") or ["另一台设备发来的消息"])[0]
+            with LOCK:
+                STATE["history"].append({"role": "user", "content": text, "id": len(STATE["history"]) + 1})
+                n_items = len(STATE["history"])
+            # 真网关在别的客户端提交 prompt 时广播 sessions.changed
+            self._broadcast({"type": "sessions.changed", "session_id": SID, "payload": {"session_id": SID}})
+            log("foreign user message:", text, "items=", n_items)
+            self._json({"ok": True, "items": n_items, "text": text})
+            return
         if path == "/ctl/clarify":
             self._broadcast_request({
                 "method": "clarify",
@@ -350,6 +371,50 @@ class Handler(BaseHTTPRequestHandler):
             clients = list(STATE["ws_clients"])
         for i, c in enumerate(clients):
             c._send({"jsonrpc": "2.0", "id": 9000 + i, **req})
+
+    def _stream_tools(self, n: int):
+        """一轮里穿插 n 次工具调用，验证"工具行按顺序内联、点开能看参数/返回值"。"""
+        STATE["streaming"] = True
+        self._broadcast({"type": "message.start", "session_id": SID, "payload": {}})
+        self._broadcast({"type": "message.delta", "session_id": SID,
+                         "payload": {"text": "先看一下环境，然后逐个调用工具。\n"}})
+        time.sleep(0.2)
+        for i in range(n):
+            tid = f"tool-{int(time.time()*1000)}-{i}"
+            self._broadcast({"type": "tool.start", "session_id": SID, "payload": {
+                "tool_id": tid,
+                "name": ["terminal", "web_search", "read_file"][i % 3],
+                "args": {"command": f"echo step-{i}", "timeout": 30, "描述": "工具参数多行测试"},
+                "context": f"step-{i}",
+            }})
+            time.sleep(0.7)
+            self._broadcast({"type": "tool.complete", "session_id": SID, "payload": {
+                "tool_id": tid,
+                "summary": f"step-{i} 完成",
+                "duration_s": 0.71,
+                "result": f"第 {i} 个工具的返回值：\n" + "输出行\n" * 6,
+            }})
+            self._broadcast({"type": "message.delta", "session_id": SID,
+                             "payload": {"text": f"第 {i} 步完成，继续。\n"}})
+            time.sleep(0.2)
+        self._broadcast({"type": "message.complete", "session_id": SID,
+                         "payload": {"text": "工具链跑完了。"}})
+        STATE["streaming"] = False
+        log(f"tools stream done: {n}")
+
+    def _media(self):
+        """一条带 MEDIA: 行的完成消息，验证卡片原地渲染 + 点击下载。"""
+        img = os.path.expanduser("~/share/apk/shots-debug/01-login.png")
+        txt = os.path.expanduser("~/share/inbox/README.md")
+        text = ("这是带媒体的回复，卡片应该**原地**出现（不是堆到最底部）：\n\n"
+                f"MEDIA:{img}\n\n"
+                "中间还有一段文字，用来验证顺序没被打乱。\n\n"
+                f"MEDIA:{txt}\n\n"
+                "结尾一句话。\n")
+        with LOCK:
+            STATE["history"].append({"role": "assistant", "content": text, "id": len(STATE["history"]) + 1})
+        self._broadcast({"type": "message.complete", "session_id": SID, "payload": {"text": text}})
+        log("media message pushed")
 
     def _stream(self, n: int, delay: float, size: int):
         if STATE["streaming"]:
