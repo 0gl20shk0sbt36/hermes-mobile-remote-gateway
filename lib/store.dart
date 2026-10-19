@@ -526,6 +526,12 @@ class HermesStore extends ChangeNotifier {
     _held.clear();
     opening = true;
     items.clear();
+    // 新会话没有任何历史：分页状态必须一起重置，否则会沿用上一个会话的
+    // hasMoreOlder=true（顶部常驻"加载更早"），并反复触发 loadOlder → 画面抽动。
+    hasMoreOlder = false;
+    _olderOffset = 0;
+    loadingOlder = false;
+    olderEpoch = 0;
     pending = null;
     running = false;
     // 同上：不把本地化文案固化进数据，渲染处按当前语言兜底
@@ -1231,6 +1237,7 @@ class HermesStore extends ChangeNotifier {
 
   Future<void> loadOlder({int page = 100}) async {
     if (loadingOlder || !hasMoreOlder) return;
+    if (kTrace) htrace('loadOlder.call', {'page': page, 'offset': _olderOffset, 'items': items.length});
     final api = currentApi;
     final id = sid;
     if (api == null || id == null || id.isEmpty) return;

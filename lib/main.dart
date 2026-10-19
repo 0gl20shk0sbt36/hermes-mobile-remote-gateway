@@ -1256,6 +1256,7 @@ class _ChatViewState extends State<ChatView> {
   /// * 用户往上滚就"脱离跟随"，滚回底部自动恢复。
   static const double _stickOffset = 70;
   bool _atBottom = true;
+  bool _followScheduled = false;
   int? _lastTracePx;
   bool _awayFromLatest = false;
   Timer? _jumpBackTimer;
@@ -1398,8 +1399,15 @@ class _ChatViewState extends State<ChatView> {
     }
 
     // ② 贴底 → 跟随最新；不贴底 → 一律不动（顶部坐标下追加内容本来就不会移动视线）。
+    //    同一帧内可能来好几次通知（store + 布局），合并成一次跳转，避免连跳造成抽动。
     if (_atBottom && _scrollIdle) {
-      _settleTo(() => _scroll.position.maxScrollExtent);
+      if (_followScheduled) return;
+      _followScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _followScheduled = false;
+        if (!mounted || !_scroll.hasClients || !_atBottom) return;
+        _settleTo(() => _scroll.position.maxScrollExtent);
+      });
       return;
     }
 
@@ -1438,6 +1446,8 @@ class _ChatViewState extends State<ChatView> {
   void _maybeLoadOlder() {
     if (!_scroll.hasClients) return;
     if (!store.hasMoreOlder || store.loadingOlder) return;
+    // 列表还短于"一页"就没有历史可翻：避免新会话顶部常驻加载标志、每帧去拉空页。
+    if (store.items.length < 20) return;
     final pos = _scroll.position;
     if (!pos.hasContentDimensions) return;
     // 顶部坐标：越靠近 0 越靠近"最旧"的一头。
@@ -1506,6 +1516,9 @@ class _ChatViewState extends State<ChatView> {
     }
     final items = store.items.reversed.toList();
     final extra = store.running ? 1 : 0;
+    // 只有确实还有更早的消息（或正在翻）才画顶部那一行：
+    // 新会话/已翻到头时不该出现"没有更早的消息"这种常驻提示。
+    final showOlderRow = store.hasMoreOlder || store.loadingOlder;
     // 包一层 SelectionArea：长按 = 原生文本选择（可拖手柄选一部分），
     // 而不是把整条消息一次性复制走。gpt_markdown 自己的文档也是这个用法。
     return Stack(children: [
@@ -1533,9 +1546,9 @@ class _ChatViewState extends State<ChatView> {
                 reverse: false,
                 // 顶部坐标：末尾追加内容不会移动已有内容（use-stick-to-bottom / Web 模型）。
                 padding: EdgeInsets.fromLTRB(16, 12 + insets.top, 16, 12 + insets.bottom),
-                itemCount: items.length + extra + 1,
+                itemCount: items.length + extra + (showOlderRow ? 1 : 0),
                 itemBuilder: (context, i) {
-                  if (i == 0) {
+                  if (showOlderRow && i == 0) {
                     // 视觉最上方 = 最旧的一头：历史分页入口
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 12),
@@ -1556,7 +1569,7 @@ class _ChatViewState extends State<ChatView> {
                   }
                   // items 是**最新在前**（旧版反列表 index 0 = 最新）。
                   // 正序列表从顶部（最旧）开始画，所以要翻转索引。
-                  final k = items.length - i;
+                  final k = items.length - (i - (showOlderRow ? 1 : 0)) - 1;
                   if (k < 0) return RunningLine(store: store);
                   final it = items[k];
                   final older = k + 1 < items.length ? items[k + 1] : null;

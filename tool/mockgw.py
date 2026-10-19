@@ -42,6 +42,8 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 SID = "mock-session-1"
 
 STATE = {
+    "active_sid": SID,
+    "seq": 0,
     "history": [],          # [{role, content, id}]
     "streaming": False,
     "stream_sent": 0,
@@ -164,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
             text = (q.get("text") or ["手动追加的一条消息。"])[0]
             with LOCK:
                 STATE["history"].append({"role": "assistant", "content": text, "id": len(STATE["history"]) + 1})
-            self._broadcast({"type": "message.complete", "session_id": SID, "payload": {"text": text}})
+            self._broadcast({"type": "message.complete", "session_id": STATE["active_sid"], "payload": {"text": text}})
             self._json({"ok": True, "items": len(STATE["history"])})
             return
         if path == "/ctl/tools":
@@ -184,7 +186,7 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["history"].append({"role": "user", "content": text, "id": len(STATE["history"]) + 1})
                 n_items = len(STATE["history"])
             # 真网关在别的客户端提交 prompt 时广播 sessions.changed
-            self._broadcast({"type": "sessions.changed", "session_id": SID, "payload": {"session_id": SID}})
+            self._broadcast({"type": "sessions.changed", "session_id": STATE["active_sid"], "payload": {"session_id": STATE["active_sid"]}})
             log("foreign user message:", text, "items=", n_items)
             self._json({"ok": True, "items": n_items, "text": text})
             return
@@ -192,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
             self._broadcast_request({
                 "method": "clarify",
                 "params": {
-                    "session_id": SID,
+                    "session_id": STATE["active_sid"],
                     "questions": [
                         {"qid": "q0", "question": "调试提问：清不清缓存？",
                          "choices": ["先别清 (Recommended)", "现在就清"], "multi_select": False},
@@ -251,7 +253,7 @@ class Handler(BaseHTTPRequestHandler):
                 rows.append(row)
             log(f"HTTP history offset={offset} limit={limit} -> {len(rows)}")
             self._json({
-                "session_id": SID,
+                "session_id": STATE["active_sid"],
                 "profile": "mock",
                 "messages": rows,
                 "pagination": {"limit": limit, "offset": offset, "order": order, "returned": len(rows)},
@@ -343,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
             }]}
         elif method == "session.resume":
             result = {
-                "session_id": SID, "running": False, "message_count": len(STATE["history"]),
+                "session_id": STATE["active_sid"], "running": False, "message_count": len(STATE["history"]),
                 "info": {"model": "mock-model", "provider": "mock", "reasoning_effort": "medium"},
                 "messages": [],
             }
@@ -352,8 +354,20 @@ class Handler(BaseHTTPRequestHandler):
                 "id": SID, "session_key": SID, "title": "模拟会话（mockgw）",
                 "status": "idle", "model": "mock-model", "last_active": time.time(),
             }]}
+        elif method == "session.create":
+            STATE["seq"] += 1
+            new_sid = f"mock-session-{STATE['seq'] + 1}"
+            STATE["active_sid"] = new_sid
+            with LOCK:
+                STATE["history"] = []
+            result = {
+                "session_id": new_sid,
+                "stored_session_id": new_sid,
+                "info": {"model": "mock-model", "provider": "mock"},
+            }
+            log("session.create ->", new_sid)
         elif method == "session.status":
-            result = {"running": STATE["streaming"], "session_id": SID}
+            result = {"running": STATE["streaming"], "session_id": STATE["active_sid"]}
         elif method == "process.list":
             result = {"processes": []}
         elif method == "subagent.list":
@@ -395,29 +409,29 @@ class Handler(BaseHTTPRequestHandler):
     def _stream_tools(self, n: int):
         """一轮里穿插 n 次工具调用，验证"工具行按顺序内联、点开能看参数/返回值"。"""
         STATE["streaming"] = True
-        self._broadcast({"type": "message.start", "session_id": SID, "payload": {}})
-        self._broadcast({"type": "message.delta", "session_id": SID,
+        self._broadcast({"type": "message.start", "session_id": STATE["active_sid"], "payload": {}})
+        self._broadcast({"type": "message.delta", "session_id": STATE["active_sid"],
                          "payload": {"text": "先看一下环境，然后逐个调用工具。\n"}})
         time.sleep(0.2)
         for i in range(n):
             tid = f"tool-{int(time.time()*1000)}-{i}"
-            self._broadcast({"type": "tool.start", "session_id": SID, "payload": {
+            self._broadcast({"type": "tool.start", "session_id": STATE["active_sid"], "payload": {
                 "tool_id": tid,
                 "name": ["terminal", "web_search", "read_file"][i % 3],
                 "args": {"command": f"echo step-{i}", "timeout": 30, "描述": "工具参数多行测试"},
                 "context": f"step-{i}",
             }})
             time.sleep(0.7)
-            self._broadcast({"type": "tool.complete", "session_id": SID, "payload": {
+            self._broadcast({"type": "tool.complete", "session_id": STATE["active_sid"], "payload": {
                 "tool_id": tid,
                 "summary": f"step-{i} 完成",
                 "duration_s": 0.71,
                 "result": f"第 {i} 个工具的返回值：\n" + "输出行\n" * 6,
             }})
-            self._broadcast({"type": "message.delta", "session_id": SID,
+            self._broadcast({"type": "message.delta", "session_id": STATE["active_sid"],
                              "payload": {"text": f"第 {i} 步完成，继续。\n"}})
             time.sleep(0.2)
-        self._broadcast({"type": "message.complete", "session_id": SID,
+        self._broadcast({"type": "message.complete", "session_id": STATE["active_sid"],
                          "payload": {"text": "工具链跑完了。"}})
         STATE["streaming"] = False
         log(f"tools stream done: {n}")
@@ -433,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
                 "结尾一句话。\n")
         with LOCK:
             STATE["history"].append({"role": "assistant", "content": text, "id": len(STATE["history"]) + 1})
-        self._broadcast({"type": "message.complete", "session_id": SID, "payload": {"text": text}})
+        self._broadcast({"type": "message.complete", "session_id": STATE["active_sid"], "payload": {"text": text}})
         log("media message pushed")
 
     def _stream(self, n: int, delay: float, size: int):
@@ -441,14 +455,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         STATE["streaming"] = True
         text = ""
-        self._broadcast({"type": "message.start", "session_id": SID, "payload": {}})
+        self._broadcast({"type": "message.start", "session_id": STATE["active_sid"], "payload": {}})
         for i in range(n):
             chunk = f"[{i:03d}] 流式块{'·' * (size // 3)}\n"
             text += chunk
-            self._broadcast({"type": "message.delta", "session_id": SID, "payload": {"text": chunk}})
+            self._broadcast({"type": "message.delta", "session_id": STATE["active_sid"], "payload": {"text": chunk}})
             STATE["events_sent"] += 1
             time.sleep(delay)
-        self._broadcast({"type": "message.complete", "session_id": SID, "payload": {"text": text}})
+        self._broadcast({"type": "message.complete", "session_id": STATE["active_sid"], "payload": {"text": text}})
         with LOCK:
             STATE["history"].append({"role": "assistant", "content": text, "id": len(STATE["history"]) + 1})
             STATE["stream_sent"] += n
