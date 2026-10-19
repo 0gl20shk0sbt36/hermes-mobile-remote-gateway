@@ -190,6 +190,9 @@ class HermesApi {
                   // 手机端不渲染历史推理；且 reasoning/reasoning_content 是同一段文本存两列，
                   // 300 行历史约 610 KB，剥离后 381 KB。服务端老版本会忽略未知参数。
                   'include_reasoning': includeReasoning ? 'true' : 'false',
+                  // 历史里不要把图片内联成 data URL（一图 300 KB→400 KB base64）；
+                  // 图片按需走缩略图/原图接口。
+                  'inline_images': 'false',
                 }),
             headers: _headers)
         .timeout(const Duration(seconds: 30));
