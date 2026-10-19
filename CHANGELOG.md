@@ -1,3 +1,17 @@
+## 1.8.4+31
+
+- 修：**提问卡/审批卡收不到**（用户看到空的工具调用行，agent 说「你没回答」）。
+  两处根因，都修了：
+  1. `client.capabilities` 里多带了 `stream` 字段，后端契约 extra=forbid → 整条能力上报被
+     4000 拒绝，客户端 `catchError` 吞掉，于是这条连接永远算「老客户端」，服务端**不发**
+     提问卡（日志 `not sent: the attached client predates server→client requests`）。
+     现在载荷只有 `server_requests`；流合并偏好等后端认了这个键再说。
+  2. 能力上报原来只在 `gateway.ready` 之后发。重连后的新连接如果那一拍没走到，这条连接
+     就漏报 → 恰好在那个窗口里的提问被判死（2026-10-19 线上真实发生）。
+     现在 socket 一建好就发（`gateway.ready` 只做兜底），失败重试两次，每条连接恰好一次。
+- 新增 3 项回归测试 `test/capabilities_advertise_test.dart`：广告不等 ready、载荷形状、
+  每条新连接各报一次且不重复。
+
 ## 1.8.3+30
 
 - 思考开关做成**双保险**：除了给服务端发 `/reasoning show|hide`，客户端本身也过滤

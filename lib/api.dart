@@ -233,9 +233,10 @@ class DownloadResult {
   final String? etag;
 }
 
-/// 出站流偏好：交给服务端做合并/截断（需要服务端支持 client.capabilities.stream）。
-const int kStreamCoalesceMs = int.fromEnvironment('HERMES_COALESCE_MS', defaultValue: 200);
-const int kToolPayloadBytes = int.fromEnvironment('HERMES_TOOL_PAYLOAD_BYTES', defaultValue: 512);
+// 2026-10-19: 出站流偏好（`client.capabilities.stream`）已撤下。后端契约
+// `ClientCapabilitiesParams` 是 extra="forbid"，带上 `stream` 会让整条 capabilities 被
+// 4000 拒绝 → 能力广告静默失效 → 手机上再也收不到提问卡/审批卡。要恢复必须先让后端
+// 认这个键（或另起一个方法），别直接加回来。
 
 /// JSON-RPC over `/api/ws` — the same wire Hermes Desktop speaks.
 class Gateway extends ChangeNotifier {
@@ -315,6 +316,9 @@ class Gateway extends ChangeNotifier {
       }
       ws.pingInterval = const Duration(seconds: 20);
       _ws = ws;
+      // 能力广告必须跟着 socket 走：服务端只按“这条连接有没有报过 server_requests”
+      // 决定发不发提问卡/审批卡，重连后的新连接如果没报，那次提问会被直接判死。
+      _advertiseCapabilities(ws);
       _connectTimer?.cancel();
       _connectTimer = Timer(const Duration(seconds: 15), () => _onDone(generation));
       ws.listen(
@@ -351,19 +355,46 @@ class Gateway extends ChangeNotifier {
     _retry = 0;
     lastError = null;
     state = LinkState.connected;
-    // 同时广告出站流量偏好：支持的新服务端会按连接合并 delta / 截断工具载荷，
-    // 不支持的会忽略未知字段，行为与以前完全一致。
-    call('client.capabilities', {
-      'server_requests': true,
-      'stream': {
-        'coalesce_ms': kStreamCoalesceMs,
-        'tool_payload_bytes': kToolPayloadBytes,
-      },
-    }).catchError((_) => null);
+    // 兜底：_open() 已在 socket 建好时发过；这里只在那一发没发出去时补一次。
+    final ws = _ws;
+    if (ws != null) _advertiseCapabilities(ws);
     final reconnected = _everConnected;
     _everConnected = true;
     notifyListeners();
     if (!_closed && reconnected) events.add({'type': 'client.reconnected', 'session_id': '', 'payload': {}});
+  }
+
+  /// 已收到能力广告的 socket（每条连接只发一次）。
+  WebSocket? _advertisedSocket;
+
+  /// 告诉服务端「这条连接能处理服务端→客户端的请求」（clarify / 命令审批 / sudo 密码 / 预览 …）。
+  ///
+  /// 服务端（`tui_gateway/server_requests.py`）只按**这条 WebSocket 连接**是否广告过
+  /// `server_requests` 决定要不要发这类请求；没广告就**不发送**并让工具立刻返回
+  /// `undelivered`——agent 于是说“用户没回答”，而用户只看到一个空的工具调用行。
+  /// 能力是逐连接的：重连一次就要重报一次，所以这件事挂在 socket 建好时，
+  /// 而不是 `gateway.ready` 之后（那一拍可以不到，2026-10-19 线上就是这么漏的）。
+  ///
+  /// 参数**只能**有 `server_requests`：后端契约 extra="forbid"，多一个键整条被 4000 拒绝。
+  void _advertiseCapabilities(WebSocket ws, {int attempt = 0}) {
+    if (_closed || !identical(ws, _ws) || ws.readyState != WebSocket.open) return;
+    if (identical(_advertisedSocket, ws)) return;
+    final frame = jsonEncode({
+      'jsonrpc': '2.0',
+      'id': 'cap${++_n}',
+      'method': 'client.capabilities',
+      'params': {'server_requests': true},
+    });
+    try {
+      ws.add(frame);
+      _advertisedSocket = ws;
+      htrace('ws.out', {'method': 'client.capabilities'});
+    } catch (_) {
+      // 半个 open 的 socket 上写入可能抛：同一条连接上有界重试。
+      if (attempt < 2) {
+        Timer(const Duration(milliseconds: 300), () => _advertiseCapabilities(ws, attempt: attempt + 1));
+      }
+    }
   }
 
   void _scheduleRetry() {
