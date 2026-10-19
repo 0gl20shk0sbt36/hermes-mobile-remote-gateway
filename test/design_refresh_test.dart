@@ -40,7 +40,7 @@ void main() {
 
   testWidgets('empty session offers suggestions that fill the composer without sending', (tester) async {
     final gw = RecordingGateway();
-    final store = HermesStore(gw)..sid = 'session-a';
+    final store = HermesStore(gw)..sid = 'session-a'..showReasoning = true;
     addTearDown(store.dispose);
     await tester.pumpWidget(_host(store, gw));
     await tester.pumpAndSettle();
@@ -59,7 +59,7 @@ void main() {
 
   testWidgets('composer chip shows model and English Thinking level and opens the sheet', (tester) async {
     final gw = RecordingGateway();
-    final store = HermesStore(gw)
+    final store = HermesStore(gw)..showReasoning = true
       ..sid = 'session-a'
       ..currentModel = 'deepseek-v4-1-flash-260910'
       ..info['reasoning_effort'] = 'max';
@@ -85,7 +85,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final gw = RecordingGateway();
-    final store = HermesStore(gw)
+    final store = HermesStore(gw)..showReasoning = true
       ..sid = 'session-a'
       ..currentModel = 'deepseek-v4-1-flash-260910'
       ..info['reasoning_effort'] = 'xhigh';
@@ -144,7 +144,7 @@ void main() {
 
   test('late reasoning.available does not duplicate thinking or the reply', () async {
     final gw = RecordingGateway();
-    final store = HermesStore(gw)..sid = 'session-a';
+    final store = HermesStore(gw)..sid = 'session-a'..showReasoning = true;
     addTearDown(store.dispose);
     void ev(String type, [Map<String, dynamic> p = const {}]) =>
         gw.events.add({'type': type, 'session_id': 'session-a', 'payload': p});
@@ -170,7 +170,7 @@ void main() {
 
   test('reasoning.available alone still records the thinking before the reply', () async {
     final gw = RecordingGateway();
-    final store = HermesStore(gw)..sid = 'session-a';
+    final store = HermesStore(gw)..sid = 'session-a'..showReasoning = true;
     addTearDown(store.dispose);
     void ev(String type, [Map<String, dynamic> p = const {}]) =>
         gw.events.add({'type': type, 'session_id': 'session-a', 'payload': p});
@@ -188,7 +188,7 @@ void main() {
 
   test('real event order: spinner thinking.delta never splits the reply', () async {
     final gw = RecordingGateway();
-    final store = HermesStore(gw)..sid = 'session-a';
+    final store = HermesStore(gw)..sid = 'session-a'..showReasoning = true;
     addTearDown(store.dispose);
     void ev(String type, [Map<String, dynamic> p = const {}]) =>
         gw.events.add({'type': type, 'session_id': 'session-a', 'payload': p});

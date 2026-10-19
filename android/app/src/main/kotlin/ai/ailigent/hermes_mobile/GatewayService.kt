@@ -17,24 +17,35 @@ import android.os.PowerManager
 class GatewayService : Service() {
     companion object {
         const val ID = 9131
-        const val CHANNEL = "gateway_connection"
+        // v2：旧渠道名是硬编码阿拉伯语，中文界面下通知栏会显示「Hermes + 一串阿拉伯字母」。
+        // 渠道名创建后不可改，所以换 id 并删掉旧渠道。
+        const val CHANNEL = "gateway_connection_v2"
+        private const val LEGACY_CHANNEL = "gateway_connection"
         const val STOP = "ai.ailigent.hermes_mobile.STOP_BACKGROUND"
+        /** 通知文案，由 Dart 按当前 App 语言下发（title/channelName/channelDesc/action/status/connected）。 */
+        var pendingTexts: Map<String, String> = emptyMap()
         private var instance: GatewayService? = null
         val running: Boolean get() = instance != null
         fun update(status: String) { instance?.setStatus(status) }
     }
     private var wakeLock: PowerManager.WakeLock? = null
-    private var status = "جارٍ الاتصال بالخادم"
+    private var status = ""
+
+    private fun text(key: String, fallback: String): String =
+        pendingTexts[key]?.takeIf { it.isNotBlank() } ?: fallback
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.createNotificationChannel(NotificationChannel(CHANNEL,
-            "اتصال Hermes في الخلفية", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "يحافظ على اتصال المحادثة أثناء استخدام تطبيقات أخرى"
+        if (Build.VERSION.SDK_INT >= 26) manager.deleteNotificationChannel(LEGACY_CHANNEL)
+        val channel = NotificationChannel(CHANNEL,
+            text("channelName", "Hermes"), NotificationManager.IMPORTANCE_LOW).apply {
+            text("channelDesc", "").takeIf { it.isNotBlank() }?.let { description = it }
             setShowBadge(false)
-        })
+        }
+        manager.createNotificationChannel(channel)
+        status = text("status", status)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
         } else {
@@ -62,14 +73,14 @@ class GatewayService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Hermes يعمل في الخلفية")
+            .setContentTitle(text("title", "Hermes"))
             .setContentText(status)
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .addAction(Notification.Action.Builder(null, "إيقاف الخلفية", stop).build())
+            .addAction(Notification.Action.Builder(null, text("action", "Stop"), stop).build())
             .build()
     }
 

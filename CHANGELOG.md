@@ -1,3 +1,318 @@
+## 1.8.4+31
+
+- 修：**提问卡/审批卡收不到**（用户看到空的工具调用行，agent 说「你没回答」）。
+  两处根因，都修了：
+  1. `client.capabilities` 里多带了 `stream` 字段，后端契约 extra=forbid → 整条能力上报被
+     4000 拒绝，客户端 `catchError` 吞掉，于是这条连接永远算「老客户端」，服务端**不发**
+     提问卡（日志 `not sent: the attached client predates server→client requests`）。
+     现在载荷只有 `server_requests`；流合并偏好等后端认了这个键再说。
+  2. 能力上报原来只在 `gateway.ready` 之后发。重连后的新连接如果那一拍没走到，这条连接
+     就漏报 → 恰好在那个窗口里的提问被判死（2026-10-19 线上真实发生）。
+     现在 socket 一建好就发（`gateway.ready` 只做兜底），失败重试两次，每条连接恰好一次。
+- 新增 3 项回归测试 `test/capabilities_advertise_test.dart`：广告不等 ready、载荷形状、
+  每条新连接各报一次且不重复。
+
+## 1.8.3+30
+
+- 思考开关做成**双保险**：除了给服务端发 `/reasoning show|hide`，客户端本身也过滤
+  `reasoning.delta/available/thinking.delta` —— 服务端照发时，关掉也立刻不显示。
+- 实测（模拟器）：开 → 折叠行「思考了 1 秒」并可展开；关 → 后续推理完全不出现；
+  再开 → 立刻恢复。开关只影响新内容，已渲染的历史思考行不回溯删除。
+
+## 1.8.2+29
+
+- 修：打开会话有时停在**最旧一条**（首屏跳底时布局尺寸还没算出来，代码就此认账）。
+  现在最多重试 30 帧，尺寸就绪后再跳。
+- 图片缩放抽成 `lib/image_shrink.dart`，新增 4 项单测（大图/竖图/小图/非图片）。
+- `inline_images=false` 实测是 no-op（Hermes 行里不存 inline 图片部件），保留但不再宣称收益。
+
+## 1.8.1+28
+
+- **上传前缩放**：图片附件超过 350 KB 时，先在后台 isolate 缩到最长边 1600 / JPEG q85
+  （手机照片 3 MB → 约 300 KB），再 base64 发给服务端 —— 上行少一个数量级。
+  解码失败就按原图发送，不会挡住消息。
+- **历史不再内联图片**：请求带 `inline_images=false`，历史只留 `[image]` 占位，
+  图片按需走缩略图/原图接口（服务端支持时）。
+- 依赖新增 `image`（纯 Dart 缩放）。
+
+## 1.8.0+27
+
+- **图片流量**（本次最大的一块，全部 App 侧，不依赖服务端升级）：
+  - 聊天里图片只拉 **720px WebP 缩略图**（服务端支持时约 20–60 KB，实测 3.41 MB 照片 → **20 KB**）
+  - **磁盘缓存**（按 path + 宽度），列表滚出屏幕被回收后再进来是**零网络请求**
+  - 服务端 ETag：带 `If-None-Match` 命中回 **304**（几十字节）
+  - 点开才拉**原图**（全屏查看/保存）
+  - 老服务端会忽略缩略图参数、直接返回原图，行为不变
+- 服务端配套（隔离分支，未推）：`/api/fs/download?max_width=720&fmt=webp` 生成并缓存缩略图
+  （PIL，`~/.hermes/cache/thumbs`），只对图片扩展名生效。
+- 实测（隔离实例 9130）：原图 3.41 MB → 缩略图 20 KB（45 ms 首生成），重复请求 304。
+
+## 1.7.1+26
+
+- **省流量**（走公网隧道时的一次系统优化）：
+  1. 历史分页默认 300 行 → **120 行**，并带 `include_reasoning=false` 让服务端剥离推理字段
+     （实测这个会话最近 300 行：含推理 834 KB → 120 行剥离后 237 KB，**降到 1/3.5**）。
+     更早的记录仍可用顶部「加载更早」按 100 行/页补。
+  2. **App 在后台时停止轮询**（原来 `session.active_list` 每 4s、`process.list`+`subagent.list`
+     每 6s 一直跑，不管前后台）；回到前台立刻补一次。
+  3. 空闲时 `active_list` 4s → **12s**（有任务在跑时才 4s）。
+  4. 背景进程/子代理列表只在**面板里有内容或在跑任务**时才轮询，空列表时不再定时打 RPC。
+  5. 多设备同步每次只拉 **8 行**（原 20 行）。
+- 服务端配套：`/api/sessions/<sid>/messages` 新增 `include_reasoning=false`（默认 true，不影响桌面端），
+  **已改代码、待 dashboard 下次重启生效**；老服务端会忽略该参数，App 不受影响。
+
+## 1.7.0+25
+
+- **思考内容（reasoning）可选显示**（用户要求：可看、默认折叠、默认关）：
+  - 结论先说：之前是**没有传输**——网关 `display.show_reasoning` 默认 `false`，`reasoning.delta` /
+    `reasoning.available` 直接被掐掉；App 侧渲染其实是有的（折叠的「思考」行）。
+  - 抽屉新增「显示思考过程」开关（默认关，写入本地偏好）。打开后对本会话发
+    `command.dispatch {name:'reasoning', arg:'show'}`（会话级，不动全局 config.yaml），
+    关闭则发 `hide`；每次打开/新建会话会自动再同步一次。
+  - 渲染保持默认折叠：只占一行「思考了 N 秒」，点开看全文；思考中显示 80 字预览 + 计时。
+- 模拟器实测：开关打开后网关收到 `command.dispatch reasoning show`；推理流到达时出现
+  「思考了 2 秒」折叠行，点开显示完整推理，正文照常在其后流式输出。
+
+## 1.6.2+24
+
+- **新建会话后的抽动 / 常驻"加载更早"标志**（用户实报）：
+  - 根因一：`newSession()` 只清空消息，没重置分页状态 → 沿用上一个会话的 `hasMoreOlder=true`，
+    顶部常驻一行历史提示，并且每来一个增量就触发一次 `loadOlder()`（新会话必然拉空页/失败），
+    只有请求返回后才停 → 表现为"LLM 每输出一点就抽一下"。
+  - 根因二：列表顶部那行"没有更早的消息"是无条件渲染的，即使没有任何历史。
+  - 修法：新建会话时重置 `hasMoreOlder/_olderOffset/loadingOlder/olderEpoch`；列表不足一页（<20 条）
+    不触发翻页；只有确实还有更早消息（或正在翻页）时才渲染顶部那一行。
+  - 贴底跟随改成"同一帧内合并成一次跳转"，避免 store 通知 + 布局两拍各跳一次造成的抖动。
+- 模拟器实测（新建会话 + 流式 40 块）：顶部无分页行、`loadOlder` 调用 0 次、`px` 始终等于
+  `maxScrollExtent`（gap=0），收起后仍贴底（1232/1232）。
+
+## 1.6.1+23
+
+- **抽屉底部显示安装包版本**（如「版本 1.6.1 (23)」），版本号取自 PackageManager，跟 pubspec 一致——
+  之前装完只能去系统「应用详情」里核对，容易装到共享目录里的旧包还以为升级失败。
+- 版本号自增规则固定下来：功能/协议修 → 中版本（1.5.x → 1.6.0）；修 bug → 小版本（1.6.0 → 1.6.1），
+  每次递增 versionCode（21 → 22 → 23），保证能覆盖安装。
+
+## 1.6.0+22
+
+- **常驻通知本地化**：通知栏里的持续通知原来标题/渠道名/按钮全是 Kotlin 里硬编码的阿拉伯语
+  （中文界面下就是「Hermes + 一串阿拉伯字母」）。现在这些文案由 Dart 按 App 当前语言下发：
+  标题「Hermes 正在后台运行」、渠道「Hermes 后台连接」、按钮「关闭后台连接」、初始状态「正在连接服务器…」。
+- 通知渠道换成 `gateway_connection_v2` 并删除旧渠道——Android 的渠道名创建后不可改，不换 id 的话
+  通知设置里会一直留着阿拉伯语渠道名。
+- 语言切换后重新开启后台连接即生效（服务启动时下发一次）。
+- **历史里能看见"我问过什么"**：clarify（提问卡）在历史里原来只有一个 "clarify" 标签、看不到题目。
+  现在工具行摘要直接显示题目文本，展开可看完整选项与你的回答（`{"answers": …}`）。
+- `chatItemsFromResume` 与 REST 历史行统一走同一套解析（认 `text`/`content`、认 `tool_calls` 与配对的
+  `role=tool` 行），分页与首屏行为一致。
+
+## 1.5.1+21
+
+- **历史分页（"加载更早"）修好了**：REST 历史行用的是 `content` 字段，而 `chatItemsFromResume` 只读 `text`，
+  导致翻页抓回来的整页变成空气泡（实测 100 行 → 50 个空 item，滑到顶整屏空白）。现在 `text`/`content`/`display_content` 都认。
+- 分页前插补偿加护栏：`maxScrollExtent` 是惰性估算，刚插入一页时会从 7.5 万塌到 6 千，
+  照 `offset + grew` 补偿会把视图甩出好几屏（实测 -69874px）。估算不合理时不补偿。
+- 文件卡片的 MIME 按扩展名给全（md/txt/json/zip/图片/音视频…），
+  不再一律 `*/*`（之前点开 .md 会列出"日历/证书安装器"这类无关应用）。
+- 调试基建：`lib/trace.dart` 遥测（debug 构建默认开，release 零开销）、`tool/mockgw.py` 模拟网关、
+  `tool/scenario-e2e.py` 场景驱动；新增 `test/history_pagination_test.dart` 回归。
+
+## 1.5.0+20
+
+- Ported the **web/RN scroll model** to Flutter (no maintained equivalent exists in Flutter):
+  - transcript list is **top-anchored** (`reverse: false`), so appending at the end cannot move content above;
+  - "stick to bottom" only when within 70px of the bottom (the same 70px threshold `use-stick-to-bottom`,
+    the engine behind bolt.new, uses), plus the initial jump to the newest message on open;
+  - older pages (the only case where content really is inserted above) re-anchor by the measured delta —
+    the `firstItemIndex` idea from react-virtuoso / RN's `maintainVisibleContentPosition`.
+- Fixed the real reason the previous attempt looked broken: `store.items` is newest-first, so a top-anchored
+  list has to walk it backwards; without that flip the transcript rendered upside down and new rows landed
+  at the visual top.
+- Regression tests now cover the model: opens at the newest message, a new row while reading history moves
+  nothing (offset and the visible bubble both pinned), streaming likewise, and at-bottom keeps following.
+
+`flutter analyze`: 0 issues · `flutter test`: 166 passed.
+
+## 1.4.5+19
+
+- Reverted the top-anchored experiment (it lost the "opens at the newest message" behaviour and threw
+  runtime errors); the list is reversed again, so a session always opens at the bottom.
+- Reading position is now held by a **centre anchor** fed through a **multi-frame convergence loop**:
+  the bubble nearest the viewport centre is remembered before a change and pushed back to the same y on
+  each following frame until the offset settles. Two reasons the earlier attempts failed:
+  1. a `SliverList` only knows the new extent one frame later, so a single `jumpTo` gets clamped and the
+     compensation is silently dropped;
+  2. anchoring on the *top-most* bubble loses its render object as soon as content shifts (it scrolls
+     out and is recycled), so the correction had nothing to measure.
+- Every correction is still gated on `isScrollingNotifier` — nothing is touched while a drag or fling is
+  running.
+- History pagination is wired back onto the reversed list (row at the oldest end, auto-load near it).
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.4.4+18
+
+- The transcript list is now **non-reversed** (top-anchored), which removes the drift instead of
+  compensating for it. In a `reverse: true` list the scroll offset is measured from the bottom, so any
+  growth at the newest end pushes everything above it — every workaround (pixel compensation, anchors,
+  freezing) fought that. Top-anchored, appending at the end cannot move existing content, which is how
+  web chat UIs behave. The list still follows the newest output, but only while it is already at the
+  bottom; the first layout jumps to the bottom once (and older pages, which really are inserted above,
+  re-anchor by the height delta).
+- Older pages still load on scroll-to-top; the page insert is the only case that needs re-anchoring now,
+  and it is tracked explicitly (`store.olderEpoch`).
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.4.3+17
+
+- History pagination: the transcript now opens with the newest page and loads older messages on demand —
+  scrolling near the oldest end (or tapping the row at the top) pulls the next page via
+  `GET /api/sessions/<sid>/messages?limit&offset&order=latest`, merges it above the current content and
+  de-duplicates the page boundary. A spinner shows while a page is in flight, and the row says so when
+  there is nothing older left.
+- Because older rows are appended beyond the current scroll extent, the list does not move when a page
+  arrives (same behaviour as the reference chat list's `onEndReached`).
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.4.2+16
+
+- Adopted the reference model (Flyer Chat's `flutter_chat_ui`, `ChatAnimatedList`): **the transcript's
+  scroll position is never adjusted programmatically except when already at the bottom** (or right after
+  sending). All of the custom pixel-compensation / anchor code is gone — that code was what jumped while
+  you were scrolling, because `ScrollPosition.jumpTo` cancels any scroll activity that is in flight,
+  including a ballistic fling.
+- A "jump back to latest" button now appears ~250 ms after you scroll away (same delay the reference
+  library uses), so it does not flicker during a fling.
+- Behaviour you should see: while reading history, arriving tokens grow the newest bubble and the list
+  simply follows Flutter's reversed-viewport rules — no jumps; if the list is at the bottom it keeps
+  following the newest content on its own.
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.4.1+15
+
+- Fix: corrections no longer fight the user's scrolling. `jumpTo` cancels any in-flight scroll
+  activity (`ScrollPosition.jumpTo` docs), so compensating while a drag **or a ballistic fling** was
+  running made the view jump mid-scroll. The old guard only covered a finger-down drag
+  (`ScrollStartNotification.dragDetails != null`); a fling sends the same notification with no drag
+  details. Every correction is now gated on `ScrollPosition.isScrollingNotifier` (true for the whole
+  scroll, idle-only when safe) plus the notification state, so while you are scrolling nothing is
+  touched at all.
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.4.0+14
+
+- Reworked the transcript's scroll logic around an **anchor** instead of pixel deltas. The viewport's
+  top-most visible bubble is remembered (item + screen y) right before any content change and pushed
+  back to that same y after layout, so the reading position no longer moves when a turn *ends* — the
+  old code only compensated growth, and the end of a turn shrinks the list (the running line disappears,
+  an empty placeholder item is dropped, the streaming text is finalised), which snapped the view to the
+  top. Both directions are now handled by the same rule, and the fallback path (anchor item removed)
+  restores the last resting offset. Item keys are stable per `ChatItem`, so reordering never resets the
+  scroll state.
+
+`flutter analyze`: 0 issues · `flutter test`: 165 passed.
+
+## 1.3.9+13
+
+- Multi-device sync: a user message typed on another surface (Windows desktop ↔ phone) now shows up
+  without refreshing. The gateway never broadcast the user's own row, so each client only ever saw
+  its own sends. On this side the app now pulls one page of the transcript when a turn starts (and on
+  `sessions.changed`) and merges the last user row if it isn't already present (dedupe by text, so
+  your own optimistic bubble is not duplicated).
+
+`flutter analyze`: 0 issues (2 info lints) · `flutter test`: 165 passed.
+
+## 1.3.8+12
+
+- Fix: tapping a received file did nothing (no chooser, no installer). Three separate causes:
+  1. downloads were written to `getApplicationDocumentsDirectory()` (`…/app_flutter`), which is
+     **not** covered by open_filex's FileProvider (`files/` + `cache/` only) — so the URI could not
+     be opened at all. They now go to `getApplicationSupportDirectory()` (`…/files`).
+  2. `REQUEST_INSTALL_PACKAGES` was missing, so Android 8+ refused to launch the APK installer.
+  3. no `<queries>` entry for `application/vnd.android.package-archive` / `VIEW`, so Android 11+
+     package visibility hid the installer and open_filex reported "no app can open this".
+  APK/PDF now also pass an explicit MIME type, and a failed install shows the real reason instead of
+  staying silent (the user still has to allow "install unknown apps" for Hermes once).
+
+`flutter analyze`: 0 issues · `flutter test`: 158 passed.
+
+## 1.3.7+11
+
+- Fix: a `MEDIA:<path>` line **inside a fenced code block** is no longer treated as a real attachment.
+  Splitting on it cut the code fence in half, which rendered as an empty code block plus mis-paired
+  fences (the following paragraph fell inside the block) and a phantom media card. The splitter now
+  tracks ```/~~~ fences and only honours `MEDIA:` lines outside them.
+
+`flutter analyze`: 0 issues · `flutter test`: 158 passed.
+
+## 1.3.6+10
+
+- Files the agent sends (`MEDIA:<path>`) stay where they were written: the marker line is replaced by a
+  card **in place** instead of every card being collected at the end of the message, and images render
+  inline at that spot. Only a line that is exactly `MEDIA:<path>` counts — a mention inside a sentence or
+  inline code no longer spawns a phantom card (that bug is what made a tap report "file not found").
+- Links are tappable: a short tap opens the system browser (`http`/`https`/`mailto`/`tel` only — other
+  schemes such as `intent:`/`file:`/`javascript:` are refused), while long-press still selects and copies
+  text, because gpt_markdown resolves link taps at paragraph level without taking selection away.
+
+`flutter analyze`: 0 issues · `flutter test`: 156 passed.
+
+## 1.3.5+9
+
+- The question panel (clarify / approval) can be collapsed: tap the title row to keep just the header
+  plus a one-line summary of the next unanswered question, so the panel stops covering the conversation
+  while you read back. The choice is remembered for the next question too, and a multi-question card
+  shows how many you have already answered. Tapping again expands it back.
+
+`flutter analyze`: 0 issues · `flutter test`: 148 passed.
+
+## 1.3.4+8
+
+- Reading position is kept while new output arrives: when the transcript is scrolled away from the newest
+  message, the viewport is compensated by the same amount the content grew, so a new tool row or streamed
+  text no longer pushes what you are reading out of view. (A small residual is expected: content outside
+  the viewport is laid out from an estimate.)
+- Duplicate output hardening: a replayed `message.delta` chunk that the streaming bubble already ends with
+  is ignored, `message.complete` never re-adds text already delivered in this turn (interim included), and
+  `session.resume`'s in-flight tail is not appended when the transcript already ends with the same text.
+- Top bar: the session actions are now labelled pills — 「归档」 (release the session from this phone) and
+  「新建」 (new session) — instead of two ambiguous icons (archive box / pencil).
+- Emulator builds are a first-class Gradle flavour: `--flavor emu` disables Impeller via
+  `src/emu/AndroidManifest.xml`; the shipped `prod` flavour is untouched. See docs/EMULATOR.md.
+- `HermesApplication` no longer hands a destroyed engine to a recreated activity (engine lifecycle
+  listener + `FlutterEngineCache` + `isExecutingDart` check), which fixes the
+  `FlutterJNI is not attached to native` crash seen when the APK is installed while the app is starting.
+
+`flutter analyze`: 0 issues · `flutter test`: 145 passed.
+
+## 1.3.3+7
+
+- Background activity panel no longer flickers: rows now follow the gateway's report. `process.list` keeps
+  recently-finished processes, so the old "clear a row 6 s after it finishes" timer fought the 6 s poll
+  (row removed, then re-created by the next poll, forever). Rows stay while the server still reports them
+  and disappear once it stops; the linger window now only applies to event-only rows.
+- `_serverRows` is cleared with the session so a re-used id cannot suppress the linger.
+
+`flutter analyze`: 0 issues · `flutter test`: 139 passed.
+
+## 1.3.2+6
+
+Seven mobile-client fixes reported on 2026-10-16.
+
+- Clarify answers are sent as `{"answers": {qid: value}}`; the previous frame (`{"answer": ...}`) made the gateway treat every answer as a cancel. The card is now a form: per-question choices (single or `multi_select`), a free-text answer, and an explicit submit button.
+- Tool rows render in order: no more pre-created placeholder bubble, so text that follows a tool call gets its own bubble, and `message.interim` (commentary around tool calls) is no longer dropped.
+- Tool rows keep the full arguments and the return value (live `tool.start`/`tool.complete`, stored `content` in history) with expandable, full-screen and copyable payloads.
+- Background activity panel is height-capped and scrolls internally, so the collapse control stays reachable; every row opens a detail sheet (subagents poll `subagent.tail` for their live transcript).
+- Always-visible transcript scrollbar plus a jump-to-latest button.
+- Diagnostics panel (long-press the top-bar title): chronological server events/requests and outgoing frames, secrets redacted.
+- Offline demo mode (`--dart-define=HERMES_DEMO=true`) for reviewing the UI without a gateway.
+
+`flutter analyze`: 0 issues · `flutter test`: 137 passed.
+
 # Changelog
 
 ## 1.3.1

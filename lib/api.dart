@@ -9,6 +9,10 @@ import 'package:http/http.dart' as http;
 
 import 'connections.dart';
 import 'l10n.dart';
+import 'trace.dart';
+
+/// 当前连接对应的 HTTP 客户端（下载/历史等走 HTTP 的调用方共用）。
+HermesApi? currentApi;
 
 class AuthError implements Exception {
   AuthError(this.message);
@@ -137,30 +141,59 @@ class HermesApi {
   }
 
   /// Fetch a file from the gateway host by absolute path (what `MEDIA:` points at).
-  Future<List<int>> download(String path) async {
+  /// 下载文件。`maxWidth > 0` 时请求服务端缩略图（webp），并带上 ETag 条件头：
+  /// 命中缓存时服务端回 304，只有几十字节。老服务端会忽略这两个参数，返回原图。
+  Future<DownloadResult> downloadConditional(String path,
+      {int maxWidth = 0, String? ifNoneMatch}) async {
+    final q = <String, String>{'path': path};
+    if (maxWidth > 0) {
+      q['max_width'] = '$maxWidth';
+      q['fmt'] = 'webp';
+    }
+    final headers = Map<String, String>.from(_headers);
+    if (ifNoneMatch != null && ifNoneMatch.isNotEmpty) headers['If-None-Match'] = ifNoneMatch;
     Future<http.Response> get() => http
-        .get(Uri.parse('$baseUrl/api/fs/download').replace(queryParameters: {'path': path}), headers: _headers)
+        .get(Uri.parse('$baseUrl/api/fs/download').replace(queryParameters: q), headers: headers)
         .timeout(const Duration(seconds: 120));
     var r = await get();
     if (r.statusCode == 401 || r.statusCode == 403) {
       await login();
       r = await get();
     }
+    if (r.statusCode == 304) {
+      return DownloadResult(notModified: true, etag: r.headers['etag']);
+    }
     if (r.statusCode == 404) throw L10n.t('الملف غير موجود على الخادم');
     if (r.statusCode == 413) throw L10n.t('الملف أكبر من المسموح');
     if (r.statusCode != 200) throw L10n.t('تعذر التنزيل (رمز {0})', [r.statusCode]);
-    return r.bodyBytes;
+    return DownloadResult(bytes: r.bodyBytes, etag: r.headers['etag']);
+  }
+
+  Future<List<int>> download(String path, {int maxWidth = 0}) async {
+    final r = await downloadConditional(path, maxWidth: maxWidth);
+    return r.bytes ?? const <int>[];
   }
 
   /// The latest page of a stored session's transcript (chronological). This is
   /// the transcript source the desktop uses too: `session.resume` with the
   /// full history serialises every message of the whole compression lineage
   /// (megabytes on a long session) and blocks the switch for seconds.
-  Future<List<Map<String, dynamic>>> sessionMessages(String storedId, {int limit = 300}) async {
+  Future<List<Map<String, dynamic>>> sessionMessages(String storedId,
+      {int limit = 120, int offset = 0, bool includeReasoning = false}) async {
     Future<http.Response> get() => http
         .get(
             Uri.parse('$baseUrl/api/sessions/${Uri.encodeComponent(storedId)}/messages')
-                .replace(queryParameters: {'limit': '$limit', 'order': 'latest'}),
+                .replace(queryParameters: {
+                  'limit': '$limit',
+                  'offset': '$offset',
+                  'order': 'latest',
+                  // 手机端不渲染历史推理；且 reasoning/reasoning_content 是同一段文本存两列，
+                  // 300 行历史约 610 KB，剥离后 381 KB。服务端老版本会忽略未知参数。
+                  'include_reasoning': includeReasoning ? 'true' : 'false',
+                  // 历史里不要把图片内联成 data URL（一图 300 KB→400 KB base64）；
+                  // 图片按需走缩略图/原图接口。
+                  'inline_images': 'false',
+                }),
             headers: _headers)
         .timeout(const Duration(seconds: 30));
     var r = await get();
@@ -191,6 +224,19 @@ class HermesApi {
 }
 
 enum LinkState { connecting, connected, offline }
+
+/// [HermesApi.downloadConditional] 的结果：要么拿到字节，要么服务端说 304（缓存仍有效）。
+class DownloadResult {
+  const DownloadResult({this.bytes, this.notModified = false, this.etag});
+  final List<int>? bytes;
+  final bool notModified;
+  final String? etag;
+}
+
+// 2026-10-19: 出站流偏好（`client.capabilities.stream`）已撤下。后端契约
+// `ClientCapabilitiesParams` 是 extra="forbid"，带上 `stream` 会让整条 capabilities 被
+// 4000 拒绝 → 能力广告静默失效 → 手机上再也收不到提问卡/审批卡。要恢复必须先让后端
+// 认这个键（或另起一个方法），别直接加回来。
 
 /// JSON-RPC over `/api/ws` — the same wire Hermes Desktop speaks.
 class Gateway extends ChangeNotifier {
@@ -259,7 +305,9 @@ class Gateway extends ChangeNotifier {
       final ticket = await api.ticket();
       if (!_current(generation)) return;
       final url = Uri.parse('${api.baseUrl.replaceFirst(RegExp('^http'), 'ws')}/api/ws')
-          .replace(queryParameters: {'ticket': ticket});
+          // thin=1：只有装了 hermes-mobile-gw 前置时才生效（流式合并/工具节选），
+          // 原生 dashboard 会忽略未知参数，行为不变。
+          .replace(queryParameters: {'ticket': ticket, 'thin': '1'});
       final ws = await WebSocket.connect(url.toString());
       // A timed-out/closed attempt still owns its late socket, never the new one.
       if (!_current(generation)) {
@@ -268,6 +316,9 @@ class Gateway extends ChangeNotifier {
       }
       ws.pingInterval = const Duration(seconds: 20);
       _ws = ws;
+      // 能力广告必须跟着 socket 走：服务端只按“这条连接有没有报过 server_requests”
+      // 决定发不发提问卡/审批卡，重连后的新连接如果没报，那次提问会被直接判死。
+      _advertiseCapabilities(ws);
       _connectTimer?.cancel();
       _connectTimer = Timer(const Duration(seconds: 15), () => _onDone(generation));
       ws.listen(
@@ -304,11 +355,46 @@ class Gateway extends ChangeNotifier {
     _retry = 0;
     lastError = null;
     state = LinkState.connected;
-    call('client.capabilities', {'server_requests': true}).catchError((_) => null);
+    // 兜底：_open() 已在 socket 建好时发过；这里只在那一发没发出去时补一次。
+    final ws = _ws;
+    if (ws != null) _advertiseCapabilities(ws);
     final reconnected = _everConnected;
     _everConnected = true;
     notifyListeners();
     if (!_closed && reconnected) events.add({'type': 'client.reconnected', 'session_id': '', 'payload': {}});
+  }
+
+  /// 已收到能力广告的 socket（每条连接只发一次）。
+  WebSocket? _advertisedSocket;
+
+  /// 告诉服务端「这条连接能处理服务端→客户端的请求」（clarify / 命令审批 / sudo 密码 / 预览 …）。
+  ///
+  /// 服务端（`tui_gateway/server_requests.py`）只按**这条 WebSocket 连接**是否广告过
+  /// `server_requests` 决定要不要发这类请求；没广告就**不发送**并让工具立刻返回
+  /// `undelivered`——agent 于是说“用户没回答”，而用户只看到一个空的工具调用行。
+  /// 能力是逐连接的：重连一次就要重报一次，所以这件事挂在 socket 建好时，
+  /// 而不是 `gateway.ready` 之后（那一拍可以不到，2026-10-19 线上就是这么漏的）。
+  ///
+  /// 参数**只能**有 `server_requests`：后端契约 extra="forbid"，多一个键整条被 4000 拒绝。
+  void _advertiseCapabilities(WebSocket ws, {int attempt = 0}) {
+    if (_closed || !identical(ws, _ws) || ws.readyState != WebSocket.open) return;
+    if (identical(_advertisedSocket, ws)) return;
+    final frame = jsonEncode({
+      'jsonrpc': '2.0',
+      'id': 'cap${++_n}',
+      'method': 'client.capabilities',
+      'params': {'server_requests': true},
+    });
+    try {
+      ws.add(frame);
+      _advertisedSocket = ws;
+      htrace('ws.out', {'method': 'client.capabilities'});
+    } catch (_) {
+      // 半个 open 的 socket 上写入可能抛：同一条连接上有界重试。
+      if (attempt < 2) {
+        Timer(const Duration(milliseconds: 300), () => _advertiseCapabilities(ws, attempt: attempt + 1));
+      }
+    }
   }
 
   void _scheduleRetry() {
@@ -421,6 +507,7 @@ class Gateway extends ChangeNotifier {
     final String frame;
     try {
       frame = jsonEncode({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params});
+      htrace('ws.out', {'method': method, 'len': frame.length});
     } catch (_) {
       return Future.error(RpcError(-3, L10n.t('تعذر ترميز الطلب')));
     }

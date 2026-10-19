@@ -2,8 +2,11 @@ import 'dart:convert';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'api.dart';
+import 'trace.dart';
+import 'image_shrink.dart';
 import 'background.dart';
 import 'design.dart';
 import 'notify.dart';
@@ -14,7 +17,9 @@ export 'background.dart';
 class ChatItem {
   ChatItem.user(this.text) : kind = 'user', detail = '', done = true;
   ChatItem.assistant(this.text) : kind = 'assistant', detail = '', done = true;
-  ChatItem.tool(this.text, {this.toolId, this.detail = '', this.done = true}) : kind = 'tool';
+  ChatItem.tool(this.text,
+      {this.toolId, this.detail = '', this.done = true, this.argsText = '', this.resultText = ''})
+      : kind = 'tool';
   ChatItem.notice(this.text) : kind = 'notice', detail = '', done = true;
   ChatItem.thinking(this.text) : kind = 'thinking', detail = '', done = false;
 
@@ -25,6 +30,22 @@ class ChatItem {
   String detail;
   bool done;
   double? duration;
+
+  /// 工具调用的完整入参（live: ``tool.start`` 的 ``args_text``／``args``；
+  /// 历史：assistant 行 ``tool_calls`` 里的 arguments，格式化后的 JSON）。
+  String argsText = '';
+
+  /// 工具返回值（live: ``tool.complete`` 的 ``result_text``／``result``／``inline_diff``；
+  /// 历史：tool 行的 ``content``）。旧版本从不存它，于是只看得见一行入参摘要。
+  String resultText = '';
+
+  /// 展开后有没有正文可看（决定工具行是否可点）。
+  bool get expandable =>
+      argsText.trim().isNotEmpty || resultText.trim().isNotEmpty || detail.trim().isNotEmpty;
+
+  /// 这段文字已经"封口"（后面来了工具行/思考块/旁白）：后续 message.delta 属于新的一段，
+  /// 必须新开气泡，不能再往这条里追加。
+  bool sealed = false;
 
   /// When the item appeared locally: drives the live timer on a running tool
   /// and the "thought for Ns" label once a thinking block closes.
@@ -119,6 +140,13 @@ class PendingRequest {
   final Object id;
   final String method;
   final Map<String, dynamic> params;
+
+  /// ``questions`` for a clarify card (empty for approval); each entry carries
+  /// ``qid`` / ``question`` / ``choices`` / ``multi_select``.
+  List<Map<String, dynamic>> get questions => [
+        for (final q in (params['questions'] as List? ?? const []))
+          if (q is Map) Map<String, dynamic>.from(q),
+      ];
 }
 
 /// App state: session list, the one open chat, catalog, model options.
@@ -127,6 +155,32 @@ class HermesStore extends ChangeNotifier {
     _evSub = gw.events.stream.listen(_onEvent);
     _rqSub = gw.requests.stream.listen(_onRequest);
     gw.addListener(_onLink);
+  }
+
+  // ------------------------------------------------------------- debug trace
+  // 现场取证用：把收到的 WS 事件/服务端请求与发出去的回执按时间顺序记在内存里，
+  // 由调试面板（长按顶栏状态点）展示。敏感键（password/secret/token/code…）一律打码。
+  final List<String> debugLines = <String>[];
+  static const int debugLimit = 400;
+
+  /// 演示/取证模式用的子代理 transcript（见 lib/demo.dart）；生产路径永远为空。
+  final Map<String, String> demoTails = <String, String>{};
+
+  void _trace(String line) {
+    final stamp = DateTime.now().toIso8601String().substring(11, 19);
+    debugLines.add('$stamp  $line');
+    if (debugLines.length > debugLimit) debugLines.removeRange(0, debugLines.length - debugLimit);
+  }
+
+  /// 公开给 UI 用（比如把一次失败的手动动作记进调试面板）。
+  void trace(String line) {
+    _trace(line);
+    notifyListeners();
+  }
+
+  void clearTrace() {
+    debugLines.clear();
+    notifyListeners();
   }
 
   final Gateway gw;
@@ -248,13 +302,30 @@ class HermesStore extends ChangeNotifier {
 
   bool get connected => gw.state == LinkState.connected;
 
+  /// App 在后台时停止轮询：常驻服务只保连接，UI 侧不再定时打 RPC。
+  /// （公网/蜂窝下这是最大的一块无谓流量：原来 active_list 4s 一次 + 背景面板 6s 一次，全是常开。）
+  bool paused = false;
+  int _activeTick = 0;
+  /// 背景面板是否打开：只有打开时才轮询 process/subagent 列表。
+  bool watchBackground = false;
+
   void _onLink() {
     if (gw.state == LinkState.connected) {
       refreshSessions();
       refreshActive();
-      _activeTimer ??= Timer.periodic(const Duration(seconds: 4), (_) => refreshActive());
+      _activeTimer ??= Timer.periodic(const Duration(seconds: 4), (_) {
+        if (paused) return;
+        // 空闲时降到 12s（每 3 拍一次）；有任务在跑/正在打开时才 4s。
+        _activeTick++;
+        final busy = running || opening || submitting;
+        if (!busy && _activeTick % 3 != 0) return;
+        unawaited(refreshActive());
+      });
       _bgTimer ??= Timer.periodic(const Duration(seconds: 6), (_) {
-        if (sid != null && !opening) unawaited(refreshBackground());
+        if (paused || sid == null || opening) return;
+        // 只有面板开着或确实有任务在跑时才拉进程/子代理列表。
+        if (!watchBackground && !running && background.isEmpty) return;
+        unawaited(refreshBackground());
       });
       if (commands.isEmpty) loadCatalog();
     }
@@ -287,8 +358,10 @@ class HermesStore extends ChangeNotifier {
           )
       ];
     } catch (e) {
+      if (kTrace) htrace('sessions.err', {'e': '$e'});
       _flash(L10n.t('تعذر جلب الجلسات: {0}', [e]));
     }
+    if (kTrace) htrace('sessions.n', {'n': sessions.length, 'loading': loadingSessions});
     loadingSessions = false;
     notifyListeners();
   }
@@ -419,11 +492,13 @@ class HermesStore extends ChangeNotifier {
       final List<ChatItem> next;
       if (rows != null) {
         next = chatItemsFromRest(rows);
+        _noteHistoryRows(rows.length);
       } else {
         // A serve without the REST transcript route: the old full resume.
         final full = await gw.call('session.resume', {'session_id': row.id, 'source': 'mobile'}, const Duration(seconds: 120));
         if (gen != _openGen) return;
         next = chatItemsFromResume(full['messages'] as List?);
+        _noteHistoryRows((full['messages'] as List?)?.length ?? 0);
       }
       final isRunning = r['running'] == true;
       if (isRunning) appendInflight(next, r['inflight']);
@@ -438,6 +513,7 @@ class HermesStore extends ChangeNotifier {
       } else if (_statusKey.isEmpty && _statusRaw.isEmpty) {
         _status('يعمل...');
       }
+      unawaited(_applyReasoningFlag());
       _lastEventAt = clock();
       _idleStreak = 0;
       _busyStreak = 0;
@@ -472,6 +548,12 @@ class HermesStore extends ChangeNotifier {
     _held.clear();
     opening = true;
     items.clear();
+    // 新会话没有任何历史：分页状态必须一起重置，否则会沿用上一个会话的
+    // hasMoreOlder=true（顶部常驻"加载更早"），并反复触发 loadOlder → 画面抽动。
+    hasMoreOlder = false;
+    _olderOffset = 0;
+    loadingOlder = false;
+    olderEpoch = 0;
     pending = null;
     running = false;
     // 同上：不把本地化文案固化进数据，渲染处按当前语言兜底
@@ -482,6 +564,7 @@ class HermesStore extends ChangeNotifier {
       sid = '${r['session_id']}';
       storedId = r['stored_session_id'] as String?;
       _applyInfo((r['info'] as Map?)?.cast<String, dynamic>());
+      unawaited(_applyReasoningFlag());
       unawaited(refreshBackground());
     } catch (e) {
       _flash(L10n.t('تعذر إنشاء جلسة: {0}', [e]));
@@ -770,10 +853,20 @@ class HermesStore extends ChangeNotifier {
     a.error = null;
     notifyListeners();
     try {
+      var payload = a.bytes;
+      // 图片先缩放：手机照片 3 MB → ~300 KB，base64 后少传一个数量级（纯 Dart，后台 isolate）。
+      if (a.isImage && payload.length > 350000) {
+        try {
+          final shrunk = await compute(shrinkImageForUpload, Uint8List.fromList(payload));
+          if (shrunk != null && shrunk.isNotEmpty && shrunk.length < payload.length) payload = shrunk;
+        } catch (_) {
+          // 解码失败就按原图发，不能因此挡住消息
+        }
+      }
       final ext = a.name.split('.').last.toLowerCase();
       final r = await gw.call('file.attach', {
         'session_id': a.sessionId,
-        'data_url': 'data:${_mimeOf(ext)};base64,${base64Encode(a.bytes)}',
+        'data_url': 'data:${_mimeOf(ext)};base64,${base64Encode(payload)}',
         'name': a.name,
       }, const Duration(seconds: 120));
       if (r is! Map || r['attached'] == false) throw L10n.t('رُفض الملف');
@@ -824,10 +917,35 @@ class HermesStore extends ChangeNotifier {
     await gw.call('session.interrupt', {'session_id': sid}).catchError((_) => null);
   }
 
+  /// 审批卡的回执（``{"choice": once|session|always|deny}``）。
   void answer(Object? result) {
     final p = pending;
     if (p == null) return;
+    _trace('→ ${p.method} ${_brief(result)}');
     gw.respond(p.id, result);
+    pending = null;
+    notifyListeners();
+  }
+
+  /// 提问卡（``clarify``）的回执。协议见 tui_gateway/contracts/server_requests.py：
+  /// 结果必须是 ``{"answers": {qid: value}}``；**没有 answers 的响应 = 全部取消**。
+  /// 单选 = 字符串，多选 = 字符串数组（或 JSON 数组字符串），跳过的 qid 不要放进 map。
+  void answerClarify(Map<String, Object?> answers) {
+    final p = pending;
+    if (p == null) return;
+    final frame = <String, Object?>{'answers': answers};
+    _trace('→ clarify ${_brief(frame)}');
+    gw.respond(p.id, frame);
+    pending = null;
+    notifyListeners();
+  }
+
+  /// 明确取消当前提问/审批（空结果 = cancel-all / 拒绝）。
+  void cancelPending() {
+    final p = pending;
+    if (p == null) return;
+    _trace('→ ${p.method} (cancel)');
+    gw.respond(p.id, const <String, Object?>{});
     pending = null;
     notifyListeners();
   }
@@ -841,6 +959,7 @@ class HermesStore extends ChangeNotifier {
     }
     if (params['session_id'] != null && params['session_id'] != sid) return;
     pending = PendingRequest(msg['id'] as Object, method, params);
+    _trace('← $method ${_brief(params)}');
     H.attention();
     Notify.i.ask(
       title: title.isEmpty ? L10n.t('جلسة') : title,
@@ -850,9 +969,30 @@ class HermesStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 本回合正在流式输出的那条助手气泡：**只认 items.last**。
+  ///
+  /// 这里刻意不往前找：工具行/思考块一旦插在回复后面，就说明上一段话已经封口，
+  /// 后续 delta 属于新的一段（Hermes 的一轮里可以有"先说一句 → 调工具 → 再说一句"），
+  /// 必须新开气泡。以前往前找，于是工具行之后的文字全被塞回工具行上面 —— 顺序全乱。
   ChatItem? _streamTarget() {
-    if (items.isNotEmpty && items.last.kind == 'assistant') return items.last;
-    return null;
+    if (items.isEmpty) return null;
+    final last = items.last;
+    return (last.kind == 'assistant' && !last.sealed) ? last : null;
+  }
+
+  /// 把还在流的助手气泡封口（工具行/思考块/结束符插进来之前调用）。
+  void _sealStream() {
+    for (var i = items.length - 1; i >= 0; i--) {
+      final it = items[i];
+      if (it.kind != 'assistant') break;
+      it.done = true;
+      it.sealed = true;
+      if (it.text.trim().isEmpty) {
+        items.removeAt(i);
+        continue;
+      }
+      break;
+    }
   }
 
   /// Whether the current turn (items after the last user message) already
@@ -861,6 +1001,18 @@ class HermesStore extends ChangeNotifier {
     for (final it in items.reversed) {
       if (it.kind == 'user') return false;
       if (it.kind == 'thinking') return true;
+    }
+    return false;
+  }
+
+  /// 本回合（最后一条 user 之后）是否已经有内容完全相同的助手气泡。
+  /// 用来挡住"同一段文字被投递两次"（interim + complete、重连重放等）。
+  bool _turnHasAssistantText(String text) {
+    final want = text.trim();
+    if (want.isEmpty) return false;
+    for (final it in items.reversed) {
+      if (it.kind == 'user') return false;
+      if (it.kind == 'assistant' && it.text.trim() == want) return true;
     }
     return false;
   }
@@ -876,6 +1028,13 @@ class HermesStore extends ChangeNotifier {
 
   final _dismissed = <String>{};
   final _linger = <String, Timer>{};
+
+  /// 上一轮轮询里服务端仍然在报的 id（进程/子代理）。
+  ///
+  /// 服务端的 `process.list` 语义是"运行中 **+ 刚结束**的进程"。旧实现让"结束 6 秒后自动消失"
+  /// 和轮询直接打架：删掉 → 下一轮又被服务端报回来 → 再删掉，于是面板 6 秒一个来回地闪。
+  /// 现在行跟着服务端走：还在报就留着，服务端不再报了才删。
+  final _serverRows = <String>{};
   Timer? _bgTimer;
   bool _bgBusy = false;
 
@@ -902,6 +1061,7 @@ class HermesStore extends ChangeNotifier {
     }
     _linger.clear();
     _dismissed.clear();
+    _serverRows.clear();
     background.clear();
     notifyListeners();
   }
@@ -909,8 +1069,11 @@ class HermesStore extends ChangeNotifier {
   /// Finished rows clear themselves so the strip only ever holds live work.
   /// Failures linger longer so the exit code stays readable; a row that goes
   /// back to running cancels its pending clear.
+  ///
+  /// 2026-10-16 修正：**服务端还在报的行不许定时删**。`process.list` 会一直带着刚结束的进程，
+  /// 定时删 + 下一轮又报回来 = 面板 6 秒一闪。服务端不再报了（或事件型行）才走 linger。
   void _armLinger(BackgroundActivity row) {
-    if (row.running) {
+    if (row.running || _serverRows.contains(row.id)) {
       _linger.remove(row.id)?.cancel();
       return;
     }
@@ -946,8 +1109,20 @@ class HermesStore extends ChangeNotifier {
         gw.call('subagent.list', {'session_id': id}),
       ]);
       if (_sid != id) return;
-      _reconcileProcesses((results[0] as Map?)?['processes'] as List? ?? const []);
-      _reconcileSubagents((results[1] as Map?)?['subagents'] as List? ?? const []);
+      final processes = (results[0] as Map?)?['processes'] as List? ?? const [];
+      final subagents = (results[1] as Map?)?['subagents'] as List? ?? const [];
+      _serverRows
+        ..clear()
+        ..addAll(_reportedIds(processes, 'session_id'))
+        ..addAll(_reportedIds(subagents, 'subagent_id'));
+      _reconcileProcesses(processes);
+      _reconcileSubagents(subagents);
+      // 服务端已经不再报、且不是"运行中"的行 = 真的结束了 → 删掉。
+      // 反过来：**服务端还在报的（含刚结束的）保持可见**，这是面板不闪的关键。
+      background.removeWhere((b) =>
+          (b.kind == 'process' || b.kind == 'subagent') &&
+          !b.running &&
+          !_serverRows.contains(b.id));
     } catch (_) {
       // Transient socket loss, or a backend without these RPCs: keep the
       // event-fed rows and let the next poll retry.
@@ -956,6 +1131,11 @@ class HermesStore extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  Set<String> _reportedIds(List rows, String key) => {
+        for (final raw in rows)
+          if (raw is Map && '${raw[key] ?? ''}'.isNotEmpty) '${raw[key]}',
+      };
 
   void _reconcileProcesses(List rows) {
     final reported = <String>{};
@@ -998,6 +1178,24 @@ class HermesStore extends ChangeNotifier {
       if (last.isNotEmpty) row.subtitle = last;
       row.state = BackgroundActivity.stateForSubagent('${s['status'] ?? ''}', fallback: row.state);
       _armLinger(row);
+    }
+  }
+
+  /// 子代理的实时 transcript 尾巴（``subagent.tail``：最多 16KB）。
+  /// 背景活动面板点开一个子代理时轮询它 —— 以前子代理行根本点不开。
+  Future<String> subagentTail(String subagentId) async {
+    // 演示/取证模式：没连服务器时用预置文本（见 demo.dart）。
+    if (demoTails.containsKey(subagentId)) return demoTails[subagentId]!;
+    final id = _sid;
+    if (id == null || subagentId.isEmpty) return '';
+    try {
+      final r = await gw.call('subagent.tail', {'session_id': id, 'subagent_id': subagentId},
+          const Duration(seconds: 25));
+      final text = '${r['text'] ?? ''}';
+      if (text.trim().isEmpty) return '';
+      return r['truncated'] == true ? '…\n$text' : text;
+    } catch (_) {
+      return '';
     }
   }
 
@@ -1055,6 +1253,137 @@ class HermesStore extends ChangeNotifier {
   // Events drive `running`; the 4 s active-list poll only corrects it, and only
   // when it is clearly wrong. The server keeps `running` true for a moment after
   // `message.complete` (and reports `starting` while it builds an agent on a
+  /// ── 历史分页（上滑加载更早的消息）────────────────────────────────
+  /// 服务端 `GET /api/sessions/<sid>/messages?limit&offset&order=latest`
+  /// 的 offset 以"数据库消息行"计（不是 chat item 数），所以这里单独记 `_olderOffset`。
+  bool loadingOlder = false;
+  bool hasMoreOlder = true;
+  /// 是否显示模型思考内容（默认关）。开启后用 `/reasoning show` 让网关**本会话**开始推送
+  /// reasoning.delta；关闭则 hide。服务端 display.show_reasoning 默认 false，所以不开就一个字节都没有。
+  bool showReasoning = false;
+  static const _reasoningKey = 'hermes.showReasoning';
+  int _olderOffset = 0;
+  /// 每成功插入一页"更早的消息"就 +1；UI 用它区分"头顶增长"（需要补偿）和"末尾增长"（不用管）。
+  int olderEpoch = 0;
+
+  /// 打开会话时记下已经载入了多少行（后续 offset 从这里接着翻）。
+  void _noteHistoryRows(int rows) {
+    _olderOffset = rows;
+    hasMoreOlder = rows >= 20;
+  }
+
+  /// 读上次的选择（默认关）。
+  Future<void> restoreShowReasoning() async {
+    try {
+      final v = await const FlutterSecureStorage().read(key: _reasoningKey);
+      showReasoning = v == '1';
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// 切换思考内容显示。写本地偏好 + 立刻对本会话生效（不改全局 config.yaml）。
+  Future<void> setShowReasoning(bool on) async {
+    showReasoning = on;
+    notifyListeners();
+    try {
+      await const FlutterSecureStorage().write(key: _reasoningKey, value: on ? '1' : '0');
+    } catch (_) {}
+    await _applyReasoningFlag();
+  }
+
+  /// 把当前开关同步给网关（会话级）。会话还没起来时跳过，open/new 之后会再同步。
+  Future<void> _applyReasoningFlag() async {
+    final s = sid;
+    if (s == null || s.isEmpty) return;
+    try {
+      await gw.call('command.dispatch', {
+        'session_id': s,
+        'name': 'reasoning',
+        'arg': showReasoning ? 'show' : 'hide',
+      }, const Duration(seconds: 10));
+    } catch (_) {
+      // 老网关没有这个命令就静默降级：只是看不到思考内容，不影响对话。
+    }
+  }
+
+  Future<void> loadOlder({int page = 100}) async {
+    if (loadingOlder || !hasMoreOlder) return;
+    if (kTrace) htrace('loadOlder.call', {'page': page, 'offset': _olderOffset, 'items': items.length});
+    final api = currentApi;
+    final id = sid;
+    if (api == null || id == null || id.isEmpty) return;
+    loadingOlder = true;
+    notifyListeners();
+    try {
+      final rows = await api.sessionMessages(id, limit: page, offset: _olderOffset);
+      if (rows.length < page) hasMoreOlder = false;
+      _olderOffset += rows.length;
+      final older = chatItemsFromResume(rows);
+      if (kTrace) {
+        htrace('older', {
+          'rows': rows.length,
+          'items_before': items.length,
+          'parsed': older.length,
+          'first_parsed': older.isNotEmpty ? older.first.text.replaceAll('\n', ' ').substring(0, older.first.text.length.clamp(0, 24)) : '',
+          'roles': rows.take(6).map((r) => '${r['role']}').join(','),
+        });
+      }
+      if (older.isNotEmpty) {
+        // 新页是更早的内容：插到列表头部（列表本身是"旧 → 新"的顺序）。
+        final boundary = items.isNotEmpty ? items.first : null;
+        var merged = older;
+        if (boundary != null) {
+          // 去掉分页边界上的重复项（同角色同文本）。
+          while (merged.isNotEmpty &&
+              merged.last.kind == boundary.kind &&
+              merged.last.text.trim() == boundary.text.trim()) {
+            merged = merged.sublist(0, merged.length - 1);
+          }
+        }
+        items.insertAll(0, merged);
+        olderEpoch++;
+        if (kTrace) {
+          htrace('older.merged', {
+            'merged': merged.length,
+            'items_after': items.length,
+            'epoch': olderEpoch,
+            'head_empty': items.isEmpty ? -1 : items.first.text.trim().length,
+            'tail_empty': items.isEmpty ? -1 : items.last.text.trim().length,
+          });
+        }
+      }
+    } catch (_) {
+      // 失败就保持原样，下次滑动再试
+    } finally {
+      loadingOlder = false;
+      notifyListeners();
+    }
+  }
+
+  /// 补进"别处发来的用户消息"：服务端只广播 assistant 的 message.* ，用户行不广播，
+  /// 所以换设备/多客户端时，另一头发的话在本机要主动拉一页 transcript 合并进来。
+  DateTime? _lastForeignSync;
+
+  Future<void> syncForeignMessages() async {
+    final api = currentApi;
+    final id = sid;
+    if (api == null || id == null || id.isEmpty) return;
+    final now = clock();
+    if (_lastForeignSync != null && now.difference(_lastForeignSync!) < const Duration(seconds: 2)) return;
+    _lastForeignSync = now;
+    try {
+      final rows = await api.sessionMessages(id, limit: 8);
+      final text = lastUserText(rows);
+      if (text == null || text.isEmpty) return;
+      if (!needsForeignUser(items, text)) return;
+      // 只追加到末尾：此时上一轮已经结束，新的一轮 assistant 内容会接在它后面。
+      items.add(ChatItem.user(text));
+      notifyListeners();
+    } catch (_) {
+      // 拉不到就算了，不打断当前流
+    }
+  }
+
   // plain resume), so trusting a single poll pinned the chat as running forever.
 
   /// Clock for the running-state guards (tests move it).
@@ -1101,11 +1430,32 @@ class HermesStore extends ChangeNotifier {
 
   void _onEvent(Map<String, dynamic> e) {
     final type = '${e['type']}';
+    // 思考内容开关是"双保险"：服务端侧按 /reasoning hide 不发，客户端侧再兜一层，
+    // 这样即便服务端照发（老版本/别的客户端改过状态），关掉也立刻不显示。
+    if (!showReasoning && (type == 'reasoning.delta' || type == 'reasoning.available' || type == 'thinking.delta')) {
+      return;
+    }
+    if (kTrace) {
+      final pl = (e['payload'] is Map) ? Map<String, dynamic>.from(e['payload'] as Map) : const <String, dynamic>{};
+      htrace('event', {
+        'type': type,
+        'items': items.length,
+        'dlen': '${pl['text'] ?? ''}'.length,
+        'sid': '${pl['session_id'] ?? e['session_id'] ?? ''}',
+      });
+    }
     // Off by default; a diagnostic build passes --dart-define=HERMES_TRACE_EVENTS=true.
     // Logs the event type only, never the payload.
     if (const bool.fromEnvironment('HERMES_TRACE_EVENTS')) debugPrint('EVT $type');
     final payload = (e['payload'] is Map) ? Map<String, dynamic>.from(e['payload'] as Map) : <String, dynamic>{};
+    // 调试面板留痕：高频的 delta / 终端输出不进（会淹掉关键帧）。
+    if (type != 'message.delta' && type != 'reasoning.delta' && type != 'thinking.delta' &&
+        type != 'agent.terminal.output' && type != 'status.update') {
+      _trace('← $type ${_brief(e['payload'])}');
+    }
     if (type == 'sessions.changed') {
+      final changed = '${payload['session_id'] ?? ''}';
+      if (changed.isEmpty || changed == sid) unawaited(syncForeignMessages());
       _debounceSessions();
       return;
     }
@@ -1162,9 +1512,12 @@ class HermesStore extends ChangeNotifier {
           _armLinger(row);
         }
       case 'message.start':
+        // 刻意不在这里插占位气泡：Hermes 一轮里"先说一句 → 调工具 → 再说一句"，
+        // 占位符排在最前面会把后面所有工具行顶到回复上方（用户看到的"工具全堆在前面"）。
+        // 气泡改由第一条 message.delta 现场创建，位置就是它真正该在的时间点。
         running = true;
         _status('يفكر...');
-        items.add(ChatItem.assistant(''));
+        unawaited(syncForeignMessages());
       case 'thinking.delta':
         // Spinner rewrites ("(◔_◔) ruminating...") and provider-wait notices,
         // not reasoning: status line only (desktop does the same). Treating
@@ -1180,8 +1533,8 @@ class HermesStore extends ChangeNotifier {
         if (last != null && last.kind == 'thinking' && !last.done) {
           last.text += t;
         } else {
-          // keep an empty assistant placeholder after the thinking block
-          if (last != null && last.kind == 'assistant' && last.text.trim().isEmpty) items.removeLast();
+          // 思考块要插在当前流式气泡之前：先给还在流的那段封口。
+          _sealStream();
           items.add(ChatItem.thinking(t));
         }
       case 'reasoning.available':
@@ -1192,11 +1545,26 @@ class HermesStore extends ChangeNotifier {
         final t = '${payload['text'] ?? ''}';
         if (t.isEmpty || _turnHasThinking()) break;
         final block = ChatItem.thinking(t)..done = true;
-        final target = _streamTarget();
-        if (target != null) {
+        if (items.isNotEmpty && items.last.kind == 'assistant') {
           items.insert(items.length - 1, block);
         } else {
           items.add(block);
+        }
+      case 'message.interim':
+        // 工具调用前后的旁白（agent.interim_assistant_callback）：服务端把它封成自己的一段。
+        // already_streamed=true 表示这段文字已经通过 message.delta 流出来了，别再塞一遍。
+        final t = '${payload['text'] ?? ''}';
+        final already = payload['already_streamed'] == true;
+        if (already) {
+          _sealStream();
+        } else if (t.trim().isNotEmpty) {
+          _sealStream();
+          // 这段旁白整段到达（没走流式）：直接封口，后续 delta 属于新的一段。
+          items.add(ChatItem.assistant(t)..sealed = true);
+        }
+        if (!running) {
+          running = true;
+          _status('يكتب الرد...');
         }
       case 'message.delta':
         _closeThinking();
@@ -1204,9 +1572,15 @@ class HermesStore extends ChangeNotifier {
         final t = '${payload['text'] ?? ''}';
         final target = _streamTarget();
         if (target == null) {
-          items.add(ChatItem.assistant(t));
+          items.add(ChatItem.assistant(t)..done = false);
+        } else if (t.length >= 8 && target.text.endsWith(t)) {
+          // 重连/重放会把同一段 delta 再发一遍（"两次输出"的常见来源之一）：
+          // 尾巴已经带了这段，就别再追加。短于 8 字符的不做这个判断，
+          // 免得把模型真的重复写的短片段（如连续两个"。"）吃掉。
+          target.done = false;
         } else {
           target.text += t;
+          target.done = false;
         }
       case 'message.complete':
         _closeThinking();
@@ -1214,12 +1588,19 @@ class HermesStore extends ChangeNotifier {
         _turnEndedAt = clock();
         statusText = '';
         final text = '${payload['text'] ?? ''}';
+        // response_previewed: 这段最终文字已经作为 interim 交付过，别再写一遍。
+        final previewed = payload['response_previewed'] == true;
         final target = _streamTarget();
         if (target != null) {
-          if (text.isNotEmpty) target.text = text;
-          if (target.text.trim().isEmpty) items.removeLast();
-        } else if (text.isNotEmpty) {
-          items.add(ChatItem.assistant(text));
+          if (text.isNotEmpty && !previewed) target.text = text;
+          target.done = true;
+          if (target.text.trim().isEmpty) {
+            items.removeLast();
+          }
+        } else if (text.isNotEmpty && !previewed) {
+          // 没有正在流的气泡：本回合任何一条助手文字跟它一样就不再写一遍
+          // （interim 已交付过的那段、或收尾重复投递，都会走到这里）。
+          if (!_turnHasAssistantText(text)) items.add(ChatItem.assistant(text));
         }
         _debounceSessions();
         if (queued.isEmpty) {
@@ -1232,9 +1613,12 @@ class HermesStore extends ChangeNotifier {
         _closeThinking();
         _status('ينفّذ {0}...', '${payload['name'] ?? L10n.t('أداة')}');
         final ctx = '${payload['context'] ?? payload['preview'] ?? ''}';
-        final target = _streamTarget();
-        if (target != null && target.text.trim().isEmpty) items.removeLast();
-        items.add(ChatItem.tool('${payload['name']}', toolId: '${payload['tool_id']}', detail: ctx, done: false));
+        _sealStream();
+        items.add(ChatItem.tool('${payload['name']}',
+            toolId: '${payload['tool_id']}',
+            detail: ctx,
+            argsText: _argsText(payload),
+            done: false));
       case 'tool.complete':
         // A background spawn usually appears right after its tool returns.
         unawaited(refreshBackground());
@@ -1245,6 +1629,9 @@ class HermesStore extends ChangeNotifier {
             it.duration = (payload['duration_s'] as num?)?.toDouble();
             final s = '${payload['summary'] ?? ''}';
             if (s.isNotEmpty && it.detail.isEmpty) it.detail = s;
+            if (it.argsText.isEmpty) it.argsText = _argsText(payload);
+            final res = _resultText(payload);
+            if (res.isNotEmpty) it.resultText = res;
             break;
           }
         }
@@ -1392,21 +1779,97 @@ class _SessionView {
 }
 
 /// Chat items from `session.resume`'s server-projected `messages`.
-List<ChatItem> chatItemsFromResume(List? msgs) {
-  final out = <ChatItem>[];
-  for (final m in msgs ?? const []) {
-    final role = m['role'];
-    if (role == 'user') {
-      final (body, files) = splitAttachments('${m['text'] ?? ''}');
-      out.add(ChatItem.user(body)..files = files);
-    } else if (role == 'assistant') {
-      final t = '${m['text'] ?? ''}';
-      if (t.trim().isNotEmpty) out.add(ChatItem.assistant(t));
-    } else if (role == 'tool') {
-      out.add(ChatItem.tool('${m['name']}', detail: '${m['context'] ?? ''}'));
+/// `session.resume` 的 messages 与 REST 历史行共用这套解析：
+/// 认 `text`/`content`，认 `tool_calls`（带 id）与配对的 `role=tool` 行（拿返回值）。
+List<ChatItem> chatItemsFromResume(List? msgs) =>
+    chatItemsFromRest((msgs ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList());
+
+/// JSON 美化（工具入参/返回值都往里走）；解析失败就原样返回。
+String prettyJson(Object? value) {
+  if (value == null) return '';
+  if (value is String) {
+    final t = value.trim();
+    if (t.isEmpty) return '';
+    try {
+      return const JsonEncoder.withIndent('  ').convert(jsonDecode(t));
+    } catch (_) {
+      return t;
     }
   }
-  return out;
+  try {
+    return const JsonEncoder.withIndent('  ').convert(value);
+  } catch (_) {
+    return '$value';
+  }
+}
+
+/// ``tool.start`` / ``tool.complete`` 里能拿到的完整入参。
+String _argsText(Map<String, dynamic> payload) {
+  final raw = payload['args_text'];
+  if (raw is String && raw.trim().isNotEmpty) return raw.trim();
+  final args = payload['args'];
+  if (args is Map && args.isNotEmpty) return prettyJson(args);
+  if (args is String && args.trim().isNotEmpty) return prettyJson(args);
+  return '';
+}
+
+/// ``tool.complete`` 里能拿到的返回值（result_text 优先，其次 result，再合并 inline_diff）。
+String _resultText(Map<String, dynamic> payload) {
+  final out = <String>[];
+  final text = payload['result_text'];
+  if (text is String && text.trim().isNotEmpty) {
+    out.add(text.trim());
+  } else if (payload['result'] != null) {
+    final r = prettyJson(payload['result']);
+    if (r.trim().isNotEmpty) out.add(r.trim());
+  }
+  final diff = payload['inline_diff'];
+  if (diff is String && diff.trim().isNotEmpty) out.add(diff.trim());
+  return out.join('\n\n');
+}
+
+/// 调试面板用的一行摘要：只留关键字段，敏感值打码，长度截断。
+String _brief(Object? payload) {
+  if (payload == null) return '';
+  try {
+    if (payload is Map) {
+      final keep = <String>[];
+      for (final entry in payload.entries.take(8)) {
+        final k = '${entry.key}';
+        final v = entry.value;
+        if (v == null) continue;
+        if (v is Map || v is List) {
+          keep.add('$k=${_redactJson(v)}');
+        } else {
+          keep.add('$k=${_redact(k, '$v')}');
+        }
+      }
+      return '{${keep.join(', ')}}';
+    }
+    return _redact('', '$payload');
+  } catch (_) {
+    return '<?>';
+  }
+}
+
+String _redactJson(Object? value) {
+  try {
+    final text = jsonEncode(value);
+    final masked = text.replaceAllMapped(
+        RegExp(r'"(password|pass|secret|token|api_key|apikey|code|otp|cookie|credential)[^"]*"\s*:\s*"[^"]*"',
+            caseSensitive: false),
+        (m) => '${m[0]!.split(':').first}:"***"');
+    return masked.length > 220 ? '${masked.substring(0, 220)}…' : masked;
+  } catch (_) {
+    return '<?>';
+  }
+}
+
+String _redact(String key, String value) {
+  final sensitive = RegExp(r'password|pass|secret|token|api_key|apikey|otp|cookie|credential',
+      caseSensitive: false).hasMatch(key);
+  final v = sensitive ? '***' : value;
+  return v.length > 200 ? '${v.substring(0, 200)}…' : v;
 }
 
 String _contentText(Object? content) {
@@ -1457,6 +1920,16 @@ String _steerText(String text) {
 }
 
 String _toolPreview(Map args) {
+  // clarify：把问题本身当摘要 —— 否则历史里只剩一个 "clarify"，用户看不到问的是什么。
+  final qs = args['questions'];
+  if (qs is List && qs.isNotEmpty && qs.first is Map) {
+    final q = '${(qs.first as Map)['question'] ?? ''}'.trim();
+    if (q.isNotEmpty) return q.length > 80 ? '${q.substring(0, 79)}…' : q;
+  }
+  final single = '${args['question'] ?? ''}'.trim();
+  if (single.isNotEmpty && (args['choices'] != null || args['options'] != null)) {
+    return single.length > 80 ? '${single.substring(0, 79)}…' : single;
+  }
   for (final k in const ['command', 'path', 'file_path', 'query', 'url', 'pattern', 'goal', 'name', 'action', 'image_url', 'urls']) {
     final v = args[k];
     if (v == null) continue;
@@ -1481,7 +1954,7 @@ List<ChatItem> chatItemsFromRest(List<Map<String, dynamic>> rows) {
     final kind = m['display_kind'] as String?;
     if (kind == 'hidden' || kind == 'model_switch' || kind == 'auto_continue') continue;
     if (m['display_content'] != null) continue; // compaction summary
-    final text = _contentText(m['content']);
+    final text = _contentText(m['content'] ?? m['text']);
     if (role == 'user') {
       if (kind == 'process_complete' || kind == 'async_delegation_complete') {
         final meta = m['display_metadata'];
@@ -1513,8 +1986,18 @@ List<ChatItem> chatItemsFromRest(List<Map<String, dynamic>> rows) {
       if (text.trim().isNotEmpty) out.add(ChatItem.assistant(text));
     } else if (role == 'tool') {
       final call = calls['${m['tool_call_id'] ?? ''}'];
-      final name = call?.$1 ?? '${m['tool_name'] ?? 'tool'}';
-      out.add(ChatItem.tool(name, detail: call == null ? '' : _toolPreview(call.$2)));
+      final name = call?.$1 ?? '${m['tool_name'] ?? m['name'] ?? 'tool'}';
+      // 入参优先取 assistant.tool_calls 里的完整 arguments；单行也能靠行内的 args 自洽。
+      final args = call?.$2 ??
+          (m['args'] is Map ? (m['args'] as Map) : const <String, dynamic>{});
+      final argsText = '${m['args_text'] ?? ''}'.trim();
+      // content 就是工具返回值原文（旧版本直接丢掉了，只留一行入参摘要）。
+      out.add(ChatItem.tool(
+        name,
+        detail: args.isEmpty ? '${m['context'] ?? ''}' : _toolPreview(args),
+        argsText: argsText.isNotEmpty ? argsText : (args.isEmpty ? '' : prettyJson(args)),
+        resultText: _contentText(m['content'] ?? m['result_text'] ?? m['result'] ?? m['output']).trim(),
+      ));
     }
   }
   return out;
@@ -1534,5 +2017,42 @@ void appendInflight(List<ChatItem> items, Object? inflight) {
     }
   }
   final assistant = '${inflight['assistant'] ?? ''}';
-  if (assistant.trim().isNotEmpty) items.add(ChatItem.assistant(assistant));
+  if (assistant.trim().isNotEmpty) {
+    // 别跟已有的最后一条助手气泡重复（重连/恢复时服务端的 inflight 尾巴
+    // 常常就是刚落盘的那一段 —— 旧实现无条件新增，于是同一段话出现两遍）。
+    final lastAssistant = items.lastWhere((i) => i.kind == 'assistant', orElse: () => ChatItem.notice(''));
+    if (lastAssistant.text.trim() != assistant.trim()) {
+      items.add(ChatItem.assistant(assistant));
+    }
+  }
+}
+
+
+/// transcript 行里最后一条 user 消息的文本（没有则 null）。纯函数，便于单测。
+String? lastUserText(List<Map<String, dynamic>> rows) {
+  for (final row in rows.reversed) {
+    if ('${row['role']}' != 'user') continue;
+    final content = row['content'];
+    final text = content is String
+        ? content
+        : content is List
+            ? content
+                .map((part) => part is Map
+                    ? '${part['text'] ?? ''}'
+                    : part is String
+                        ? part
+                        : '')
+                .join()
+            : '${row['text'] ?? ''}';
+    final trimmed = text.trim();
+    if (trimmed.isNotEmpty) return trimmed;
+  }
+  return null;
+}
+
+/// 这条 user 消息是否还需要补进本地列表（已有同文本就不补）。
+bool needsForeignUser(List<ChatItem> items, String text) {
+  final want = text.trim();
+  if (want.isEmpty) return false;
+  return !items.any((it) => it.kind == 'user' && it.text.trim() == want);
 }

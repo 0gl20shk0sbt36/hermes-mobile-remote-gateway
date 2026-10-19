@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
 
+import 'l10n.dart';
+
 /// The native service keeps this Flutter process alive while the UI is hidden.
 /// No second socket or credentials are created in Android.
 class BackgroundConnection {
@@ -24,7 +26,16 @@ class BackgroundConnection {
 
   Future<bool> _start() async {
     try {
-      await _channel.invokeMethod<void>('start');
+      // 常驻通知的文案由 Dart 按当前语言传下去：Kotlin 那边原来是硬编码阿拉伯语，
+      // 中文界面里通知标题就变成「Hermes + 一串阿拉伯字母」。
+      await _channel.invokeMethod<void>('start', <String, String>{
+        'title': L10n.t('Hermes يعمل في الخلفية'),
+        'channelName': L10n.t('اتصال Hermes في الخلفية'),
+        'channelDesc': L10n.t('يحافظ على اتصال المحادثة أثناء استخدام تطبيقات أخرى'),
+        'action': L10n.t('إيقاف الخلفية'),
+        'status': L10n.t('جارٍ الاتصال بالخادم...'),
+        'connected': L10n.t('متصل'),
+      });
       _started = true;
       lastError = null;
       return true;
@@ -59,6 +70,20 @@ class BackgroundConnection {
   Future<Map<String, dynamic>> status() async {
     final result = await _channel.invokeMapMethod<String, dynamic>('status');
     return result ?? {};
+  }
+
+  /// 安装包的版本号（来自 PackageManager，跟 pubspec 的 version 一致），
+  /// 用来自证"装的是哪一版"——之前只能去系统设置里看，容易装错旧包。
+  Future<String> appVersion() async {
+    try {
+      final v = await _channel.invokeMapMethod<String, dynamic>('version');
+      final name = '${v?['name'] ?? ''}';
+      final code = '${v?['code'] ?? ''}';
+      if (name.isEmpty) return '';
+      return code.isEmpty ? name : '$name ($code)';
+    } catch (_) {
+      return '';
+    }
   }
 
   Future<void> openBatterySettings() => _channel.invokeMethod<void>('batterySettings');

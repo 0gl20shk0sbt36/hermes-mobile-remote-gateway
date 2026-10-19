@@ -59,7 +59,42 @@ void main() {
     expect(store.runningBackground, 1);
   });
 
-  test('a finished process clears itself while a failure lingers', () async {
+  // 回归（2026-10-16）：面板"偶尔显示偶尔消失"。
+  // 服务端 process.list 会一直带着"刚结束"的进程；旧实现让"结束 6 秒后自动删"
+  // 和 6 秒一次的轮询对撞 —— 删掉 → 下轮建回来 → 再删掉，于是面板 6 秒一闪。
+  test('a finished row the server still reports stays visible (no 6s flicker)', () async {
+    store.backgroundLingerSuccess = const Duration(milliseconds: 60);
+    store.backgroundLingerFailure = const Duration(milliseconds: 60);
+    gw.handler = (method, params) async {
+      switch (method) {
+        case 'process.list':
+          return {'processes': [_proc('p-done', 'sleep 1', 'exited', exit: 0, tail: 'bye')]};
+        case 'subagent.list':
+          return {'subagents': []};
+        default:
+          return {'status': 'ok'};
+      }
+    };
+    await store.refreshBackground();
+    expect(store.background.map((b) => b.id), contains('p-done'));
+
+    // 等过 linger 时长：旧实现在这里就消失了（下轮又被建回来 = 闪）
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(store.background.map((b) => b.id), contains('p-done'),
+        reason: '服务端还在报它 → 不许定时删');
+
+    // 服务端不再报了 → 下一轮轮询才移除
+    gw.handler = (method, params) async => method == 'process.list'
+        ? {'processes': []}
+        : method == 'subagent.list'
+            ? {'subagents': []}
+            : {'status': 'ok'};
+    await store.refreshBackground();
+    expect(store.background, isEmpty, reason: '服务端不再报 → 行才该消失');
+  });
+
+  // 2026-10-16 改写：行跟着服务端报告走 —— 服务端还在报就一直显示；不再报了才消失。
+  test('rows the server stopped reporting clear themselves', () async {
     gw.handler = (method, params) async => switch (method) {
       'process.list' => {
         'processes': [
@@ -74,11 +109,44 @@ void main() {
     await store.refreshBackground();
     expect(store.background.length, 2);
 
-    await Future<void>.delayed(store.backgroundLingerSuccess + const Duration(milliseconds: 60));
-    expect(store.background.map((b) => b.id), isNot(contains('p-ok')));
+    // 服务端还在报 → 定时器不许把它们删掉（这正是那个"6 秒一闪"的根因）
+    await Future<void>.delayed(const Duration(milliseconds: 320));
+    expect(store.background.map((b) => b.id), contains('p-ok'));
     expect(store.background.map((b) => b.id), contains('p-bad'));
 
-    await Future<void>.delayed(store.backgroundLingerFailure + const Duration(milliseconds: 60));
+    // 服务端不再报 → 下一轮轮询移除
+    gw.handler = (method, params) async => switch (method) {
+      'process.list' => {'processes': []},
+      _ => gw.response(method, params),
+    };
+    await store.refreshBackground();
+    expect(store.background, isEmpty);
+  });
+
+  test('event-only rows still honour the linger window (success clears sooner)', () async {
+    store.backgroundLingerSuccess = const Duration(milliseconds: 80);
+    store.backgroundLingerFailure = const Duration(milliseconds: 250);
+    gw.handler = (method, params) async => switch (method) {
+      'process.list' => {'processes': []},
+      'subagent.list' => {'subagents': []},
+      _ => gw.response(method, params),
+    };
+    await store.refreshBackground(); // 服务端什么都没报 → 这两个 id 属于"事件型行"
+    for (final (id, status) in [('sub-ok', 'completed'), ('sub-bad', 'failed')]) {
+      gw.events.add({
+        'type': 'subagent.complete',
+        'session_id': 'session-a',
+        'payload': {'goal': 'run $id', 'task_count': 1, 'task_index': 0, 'subagent_id': id, 'status': status},
+      });
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(store.background.length, 2);
+
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(store.background.map((b) => b.id), isNot(contains('sub-ok')));
+    expect(store.background.map((b) => b.id), contains('sub-bad'));
+
+    await Future<void>.delayed(const Duration(milliseconds: 220));
     expect(store.background, isEmpty);
   });
 
@@ -356,9 +424,10 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('expanded row reveals the captured output tail', (tester) async {
+  testWidgets('tapping a row opens its detail instead of expanding inline', (tester) async {
     await tester.binding.setSurfaceSize(const Size(360, 720));
     addTearDown(() => tester.binding.setSurfaceSize(null));
+    BackgroundActivity? opened;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -375,18 +444,60 @@ void main() {
             ],
             onStop: (_) async {},
             onDismiss: (_) {},
+            onOpen: (item) => opened = item,
           ),
         ),
       ),
     );
     await tester.tap(find.textContaining('النشاط في الخلفية'));
     await settle(tester);
-    expect(find.textContaining('connection refused'), findsNothing);
+    expect(find.textContaining('connection refused'), findsNothing, reason: '正文不再塞在列表里');
 
     await tester.tap(find.textContaining('deploy.sh'));
     await settle(tester);
-    expect(find.textContaining('connection refused'), findsOneWidget);
+    expect(opened?.id, 'p-bad');
     expect(find.textContaining('رمز 2'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  // 回归（2026-10-16）：面板挂在 composer 上方、从底部往上长。没有高度上限时，
+  // 行一多整块面板就顶出屏幕，**收缩按钮跑到屏幕外点不到**。
+  testWidgets('a long list stays inside the screen and keeps the toggle tappable', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(360, 640));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: BackgroundStrip(
+            items: [
+              for (var i = 0; i < 12; i++)
+                BackgroundActivity(
+                  id: 'p-$i',
+                  kind: 'process',
+                  title: 'job-$i.sh',
+                  state: BackgroundState.running,
+                ),
+            ],
+            onStop: (_) async {},
+            onDismiss: (_) {},
+            onOpen: (_) {},
+          ),
+        ),
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.textContaining('النشاط في الخلفية'));
+    await settle(tester);
+
+    // 收缩按钮仍在屏幕内且可点：面板高度封顶 + 内部可滚。
+    final header = find.textContaining('النشاط في الخلفية');
+    expect(tester.getRect(header).top, greaterThanOrEqualTo(0));
+    expect(tester.getRect(header).bottom, lessThanOrEqualTo(640));
+    expect(find.byType(ListView), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(header);
+    await settle(tester);
+    expect(find.text('job-0.sh'), findsNothing, reason: '再点一次应能收起');
   });
 }
