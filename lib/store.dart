@@ -3,10 +3,10 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:image/image.dart' as img;
 
 import 'api.dart';
 import 'trace.dart';
+import 'image_shrink.dart';
 import 'background.dart';
 import 'design.dart';
 import 'notify.dart';
@@ -857,7 +857,7 @@ class HermesStore extends ChangeNotifier {
       // 图片先缩放：手机照片 3 MB → ~300 KB，base64 后少传一个数量级（纯 Dart，后台 isolate）。
       if (a.isImage && payload.length > 350000) {
         try {
-          final shrunk = await compute(_shrinkImage, Uint8List.fromList(payload));
+          final shrunk = await compute(shrinkImageForUpload, Uint8List.fromList(payload));
           if (shrunk != null && shrunk.isNotEmpty && shrunk.length < payload.length) payload = shrunk;
         } catch (_) {
           // 解码失败就按原图发，不能因此挡住消息
@@ -2050,18 +2050,4 @@ bool needsForeignUser(List<ChatItem> items, String text) {
   final want = text.trim();
   if (want.isEmpty) return false;
   return !items.any((it) => it.kind == 'user' && it.text.trim() == want);
-}
-
-/// 上传前把图片缩到最长边 1600、JPEG q85。跑在 `compute` 的 isolate 里。
-Uint8List? _shrinkImage(Uint8List src) {
-  final decoded = img.decodeImage(src);
-  if (decoded == null) return null;
-  const maxSide = 1600;
-  var out = decoded;
-  if (decoded.width > maxSide || decoded.height > maxSide) {
-    out = decoded.width >= decoded.height
-        ? img.copyResize(decoded, width: maxSide, interpolation: img.Interpolation.average)
-        : img.copyResize(decoded, height: maxSide, interpolation: img.Interpolation.average);
-  }
-  return Uint8List.fromList(img.encodeJpg(out, quality: 85));
 }

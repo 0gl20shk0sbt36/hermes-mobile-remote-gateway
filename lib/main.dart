@@ -1303,6 +1303,7 @@ class _ChatViewState extends State<ChatView> {
   static const double _stickOffset = 70;
   bool _atBottom = true;
   bool _followScheduled = false;
+  int _initialJumpTries = 0;
   int? _lastTracePx;
   bool _awayFromLatest = false;
   Timer? _jumpBackTimer;
@@ -1438,7 +1439,18 @@ class _ChatViewState extends State<ChatView> {
     }
 
     // ① 首次载入：落到最新（等同"打开就在底部"）。
+    //    注意：第一帧常常还没有内容尺寸（maxScrollExtent == 0），此时不能就此认账，
+    //    否则会话会停在最旧的一条（用户报过"打开显示最上面一条"）。
     if (!_didInitialJump) {
+      final pos = _scroll.position;
+      if (!pos.hasContentDimensions || pos.maxScrollExtent <= 0) {
+        if (_initialJumpTries++ < 30) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _onStore();
+          });
+        }
+        return;
+      }
       _didInitialJump = true;
       _settleTo(() => _scroll.position.maxScrollExtent);
       return;
