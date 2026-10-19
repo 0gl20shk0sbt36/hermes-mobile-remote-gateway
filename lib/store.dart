@@ -357,8 +357,10 @@ class HermesStore extends ChangeNotifier {
           )
       ];
     } catch (e) {
+      if (kTrace) htrace('sessions.err', {'e': '$e'});
       _flash(L10n.t('تعذر جلب الجلسات: {0}', [e]));
     }
+    if (kTrace) htrace('sessions.n', {'n': sessions.length, 'loading': loadingSessions});
     loadingSessions = false;
     notifyListeners();
   }

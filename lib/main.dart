@@ -22,6 +22,7 @@ import 'glass.dart';
 import 'notify.dart';
 import 'background_connection.dart';
 import 'store.dart';
+import 'image_cache.dart';
 import 'trace.dart';
 import 'l10n.dart';
 
@@ -212,7 +213,20 @@ class _BootState extends State<Boot> {
       });
       return;
     }
-    final a = await HermesApi.load();
+    // 测试包：预置连接优先于任何已保存的连接，保证 debug 包永远连到指定服务端。
+    HermesApi? a;
+    if (kPresetUrl.isNotEmpty) {
+      try {
+        a = HermesApi(kPresetUrl, kPresetUser, kPresetPass);
+        await a.login();
+        await a.ticket();
+        await a.save();
+      } catch (_) {
+        a = await HermesApi.load();
+      }
+    } else {
+      a = await HermesApi.load();
+    }
     final bio = a != null && await HermesApi.biometricEnabled();
     setState(() {
       api = a;
@@ -297,6 +311,11 @@ class LoginPage extends StatefulWidget {
   State<LoginPage> createState() => _LoginPageState();
 }
 
+/// 测试包预置连接（demo/debug 专用）：设置后自动填表并登录，省掉手输。
+const String kPresetUrl = String.fromEnvironment('HERMES_PRESET_URL');
+const String kPresetUser = String.fromEnvironment('HERMES_PRESET_USER');
+const String kPresetPass = String.fromEnvironment('HERMES_PRESET_PASS');
+
 class _LoginPageState extends State<LoginPage> {
   final url = TextEditingController();
   final user = TextEditingController();
@@ -323,6 +342,14 @@ class _LoginPageState extends State<LoginPage> {
           }
         });
       } catch (_) {}
+      // 预置连接：等首帧渲染完再提交，避免抢在控制器挂上之前
+      if (kPresetUrl.isNotEmpty && mounted) {
+        url.text = kPresetUrl;
+        user.text = kPresetUser;
+        pass.text = kPresetPass;
+        if (mounted) setState(() {});
+        WidgetsBinding.instance.addPostFrameCallback((_) => submit());
+      }
     }();
   }
 
@@ -555,7 +582,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   late final Gateway gw;
   late final HermesStore store;
   final scaffoldKey = GlobalKey<ScaffoldState>();
-  String _appVersion = '';
 
   @override
   void initState() {
@@ -576,8 +602,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     backgroundConnection.onNetworkAvailable = () => unawaited(gw.ensureHealthy());
     backgroundConnection.listen();
     unawaited(store.restoreShowReasoning());
+    // 版本只进调试日志（不再显示在抽屉里）；排查"装的哪一版"时看 logcat。
     unawaited(backgroundConnection.appVersion().then((v) {
-      if (mounted && v.isNotEmpty) setState(() => _appVersion = v);
+      if (kTrace && v.isNotEmpty) htrace('app.version', {'v': v});
     }));
     gw.addListener(_backgroundStatus);
     unawaited(_startBackground());
@@ -719,7 +746,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       builder: (context, _) => Scaffold(
         key: scaffoldKey,
         backgroundColor: kBg,
-        drawer: SessionsDrawer(store: store, onLogout: widget.onLogout, onBackground: _backgroundSettings, onConnections: widget.onConnections, version: _appVersion),
+        drawer: SessionsDrawer(store: store, onLogout: widget.onLogout, onBackground: _backgroundSettings, onConnections: widget.onConnections),
         drawerEdgeDragWidth: 60,
         drawerScrimColor: Colors.black.withValues(alpha: 0.38),
         // The transcript runs the full height; the top bar and the composer
@@ -960,13 +987,11 @@ String _sourceLabel(String s) => switch (s) {
 
 class SessionsDrawer extends StatefulWidget {
   const SessionsDrawer(
-      {super.key, required this.store, required this.onLogout, this.onBackground, this.onConnections, this.version = ''});
+      {super.key, required this.store, required this.onLogout, this.onBackground, this.onConnections});
   final VoidCallback? onBackground;
   final VoidCallback? onConnections;
   final HermesStore store;
   final VoidCallback onLogout;
-  /// 安装包版本（来自 PackageManager），自证装的是哪一版。
-  final String version;
   @override
   State<SessionsDrawer> createState() => _SessionsDrawerState();
 }
@@ -1121,12 +1146,13 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
               onTap();
             },
             child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 44),
+              // 紧凑行：5 行设置占满整个抽屉高度时，会话列表会被挤到只剩几个像素。
+              constraints: const BoxConstraints(minHeight: 36),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 child: Row(children: [
-                  ic(icon, size: 18, color: D.muted),
-                  const SizedBox(width: 12),
+                  ic(icon, size: 16, color: D.muted),
+                  const SizedBox(width: 10),
                   Expanded(child: Text(label, style: txt(14, color: D.fg.withValues(alpha: 0.86)))),
                   if (value != null)
                     Flexible(
@@ -1150,6 +1176,9 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
       child: SafeArea(
         child: DGlass(
           margin: const EdgeInsetsDirectional.fromSTEB(8, 8, 0, 8),
+          // 抽屉里会话列表用 Expanded 分配剩余高度；不给死高度时 DGlass 会按子内容收缩，
+          // 列表区被压到几像素（会话行只剩 8px 高，等于看不见）。
+          height: double.infinity,
           radius: 30,
                     tint: G.panelTint,
           panel: true,
@@ -1235,12 +1264,6 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
                 () => store.setShowReasoning(!store.showReasoning),
                 value: store.showReasoning ? L10n.t('مُفعّل') : L10n.t('مُعطّل')),
             footerBtn(tb.Language.new, L10n.t('اللغة'), () => pickLanguage(context), value: L10n.names[L10n.lang]),
-            if (widget.version.isNotEmpty)
-              Padding(
-                padding: const EdgeInsetsDirectional.only(start: 4, top: 2, bottom: 6),
-                child: Text('${L10n.t('الإصدار')} ${widget.version}',
-                    textDirection: TextDirection.ltr, style: txt(11, color: D.faint)),
-              ),
             Row(children: [
               Expanded(child: footerBtn(tb.Logout.new, L10n.t('تسجيل الخروج'), confirmLogout)),
               const BioToggle(),
@@ -3478,7 +3501,36 @@ class _MediaCardState extends State<MediaCard> {
   @override
   void initState() {
     super.initState();
-    if (isImage) _fetch();
+    if (isImage) _loadInline();
+  }
+
+  /// 列表里只加载 720px 缩略图（约 20–60 KB）并落盘：滚动回收后重进是零请求。
+  /// 点开时才走 [_fetch] 拉原图。老服务端会忽略缩略图参数、直接返回原图，不影响显示。
+  Future<void> _loadInline() async {
+    final api = currentApi;
+    if (api == null) return;
+    final key = ImageDiskCache.keyFor(widget.path, 720);
+    final cached = await ImageDiskCache.read(key);
+    if (kTrace) htrace('media.hit', {'path': widget.path, 'bytes': cached?.length ?? 0});
+    if (!mounted) return;
+    if (cached != null) {
+      setState(() => bytes = cached);
+      return;
+    }
+    setState(() => busy = true);
+    try {
+      final r = await api.downloadConditional(widget.path, maxWidth: 720);
+      final b = r.bytes;
+      if (b != null && b.isNotEmpty) {
+        if (kTrace) htrace('media.fetch', {'path': widget.path, 'bytes': b.length});
+        await ImageDiskCache.write(key, Uint8List.fromList(b));
+        if (mounted) setState(() => bytes = b);
+      }
+    } catch (e) {
+      if (mounted) setState(() => error = '$e');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
   Future<List<int>?> _fetch() async {

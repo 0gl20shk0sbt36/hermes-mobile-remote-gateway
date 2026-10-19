@@ -141,19 +141,37 @@ class HermesApi {
   }
 
   /// Fetch a file from the gateway host by absolute path (what `MEDIA:` points at).
-  Future<List<int>> download(String path) async {
+  /// 下载文件。`maxWidth > 0` 时请求服务端缩略图（webp），并带上 ETag 条件头：
+  /// 命中缓存时服务端回 304，只有几十字节。老服务端会忽略这两个参数，返回原图。
+  Future<DownloadResult> downloadConditional(String path,
+      {int maxWidth = 0, String? ifNoneMatch}) async {
+    final q = <String, String>{'path': path};
+    if (maxWidth > 0) {
+      q['max_width'] = '$maxWidth';
+      q['fmt'] = 'webp';
+    }
+    final headers = Map<String, String>.from(_headers);
+    if (ifNoneMatch != null && ifNoneMatch.isNotEmpty) headers['If-None-Match'] = ifNoneMatch;
     Future<http.Response> get() => http
-        .get(Uri.parse('$baseUrl/api/fs/download').replace(queryParameters: {'path': path}), headers: _headers)
+        .get(Uri.parse('$baseUrl/api/fs/download').replace(queryParameters: q), headers: headers)
         .timeout(const Duration(seconds: 120));
     var r = await get();
     if (r.statusCode == 401 || r.statusCode == 403) {
       await login();
       r = await get();
     }
+    if (r.statusCode == 304) {
+      return DownloadResult(notModified: true, etag: r.headers['etag']);
+    }
     if (r.statusCode == 404) throw L10n.t('الملف غير موجود على الخادم');
     if (r.statusCode == 413) throw L10n.t('الملف أكبر من المسموح');
     if (r.statusCode != 200) throw L10n.t('تعذر التنزيل (رمز {0})', [r.statusCode]);
-    return r.bodyBytes;
+    return DownloadResult(bytes: r.bodyBytes, etag: r.headers['etag']);
+  }
+
+  Future<List<int>> download(String path, {int maxWidth = 0}) async {
+    final r = await downloadConditional(path, maxWidth: maxWidth);
+    return r.bytes ?? const <int>[];
   }
 
   /// The latest page of a stored session's transcript (chronological). This is
@@ -203,6 +221,18 @@ class HermesApi {
 }
 
 enum LinkState { connecting, connected, offline }
+
+/// [HermesApi.downloadConditional] 的结果：要么拿到字节，要么服务端说 304（缓存仍有效）。
+class DownloadResult {
+  const DownloadResult({this.bytes, this.notModified = false, this.etag});
+  final List<int>? bytes;
+  final bool notModified;
+  final String? etag;
+}
+
+/// 出站流偏好：交给服务端做合并/截断（需要服务端支持 client.capabilities.stream）。
+const int kStreamCoalesceMs = int.fromEnvironment('HERMES_COALESCE_MS', defaultValue: 200);
+const int kToolPayloadBytes = int.fromEnvironment('HERMES_TOOL_PAYLOAD_BYTES', defaultValue: 512);
 
 /// JSON-RPC over `/api/ws` — the same wire Hermes Desktop speaks.
 class Gateway extends ChangeNotifier {
@@ -271,7 +301,9 @@ class Gateway extends ChangeNotifier {
       final ticket = await api.ticket();
       if (!_current(generation)) return;
       final url = Uri.parse('${api.baseUrl.replaceFirst(RegExp('^http'), 'ws')}/api/ws')
-          .replace(queryParameters: {'ticket': ticket});
+          // thin=1：只有装了 hermes-mobile-gw 前置时才生效（流式合并/工具节选），
+          // 原生 dashboard 会忽略未知参数，行为不变。
+          .replace(queryParameters: {'ticket': ticket, 'thin': '1'});
       final ws = await WebSocket.connect(url.toString());
       // A timed-out/closed attempt still owns its late socket, never the new one.
       if (!_current(generation)) {
@@ -316,7 +348,15 @@ class Gateway extends ChangeNotifier {
     _retry = 0;
     lastError = null;
     state = LinkState.connected;
-    call('client.capabilities', {'server_requests': true}).catchError((_) => null);
+    // 同时广告出站流量偏好：支持的新服务端会按连接合并 delta / 截断工具载荷，
+    // 不支持的会忽略未知字段，行为与以前完全一致。
+    call('client.capabilities', {
+      'server_requests': true,
+      'stream': {
+        'coalesce_ms': kStreamCoalesceMs,
+        'tool_payload_bytes': kToolPayloadBytes,
+      },
+    }).catchError((_) => null);
     final reconnected = _everConnected;
     _everConnected = true;
     notifyListeners();

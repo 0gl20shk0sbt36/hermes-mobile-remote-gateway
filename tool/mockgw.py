@@ -268,16 +268,39 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fs/download":
             q = urllib.parse.parse_qs(parsed.query)
             target = (q.get("path") or [""])[0]
+            max_width = int((q.get("max_width") or ["0"])[0] or 0)
             try:
-                data = open(os.path.expanduser(target), "rb").read()
+                raw = open(os.path.expanduser(target), "rb").read()
             except OSError:
                 self._json({"detail": "not found"}, 404)
                 return
+            ctype = "application/octet-stream"
+            if max_width > 0 and target.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                try:
+                    import io as _io
+                    from PIL import Image as _Image
+                    with _Image.open(_io.BytesIO(raw)) as im:
+                        if im.width > max_width:
+                            h = max(1, round(im.height * max_width / im.width))
+                            im = im.resize((max_width, h))
+                        buf = _io.BytesIO()
+                        im.convert("RGB").save(buf, format="WEBP", quality=78, method=4)
+                        raw = buf.getvalue()
+                    ctype = "image/webp"
+                except Exception as exc:
+                    log("thumb failed:", exc)
+            etag = 'W/"%s"' % hashlib.sha1(raw).hexdigest()[:16]
+            if (self.headers.get("If-None-Match") or "") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.end_headers()
+                return
             self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Type", ctype)
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(raw)
             return
         if path in ("/", "/login"):
             self._json({"ok": True, "mock": True})
