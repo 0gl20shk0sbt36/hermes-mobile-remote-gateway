@@ -1430,6 +1430,11 @@ class HermesStore extends ChangeNotifier {
 
   void _onEvent(Map<String, dynamic> e) {
     final type = '${e['type']}';
+    // 思考内容开关是"双保险"：服务端侧按 /reasoning hide 不发，客户端侧再兜一层，
+    // 这样即便服务端照发（老版本/别的客户端改过状态），关掉也立刻不显示。
+    if (!showReasoning && (type == 'reasoning.delta' || type == 'reasoning.available' || type == 'thinking.delta')) {
+      return;
+    }
     if (kTrace) {
       final pl = (e['payload'] is Map) ? Map<String, dynamic>.from(e['payload'] as Map) : const <String, dynamic>{};
       htrace('event', {
