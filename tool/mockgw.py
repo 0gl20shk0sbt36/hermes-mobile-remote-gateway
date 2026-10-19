@@ -169,6 +169,12 @@ class Handler(BaseHTTPRequestHandler):
             self._broadcast({"type": "message.complete", "session_id": STATE["active_sid"], "payload": {"text": text}})
             self._json({"ok": True, "items": len(STATE["history"])})
             return
+        if path == "/ctl/reason":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            n = int((q.get("n") or ["8"])[0])
+            threading.Thread(target=self._stream_reason, args=(n,), daemon=True).start()
+            self._json({"ok": True, "chunks": n})
+            return
         if path == "/ctl/tools":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             n = int((q.get("n") or ["2"])[0])
@@ -405,6 +411,24 @@ class Handler(BaseHTTPRequestHandler):
             clients = list(STATE["ws_clients"])
         for i, c in enumerate(clients):
             c._send({"jsonrpc": "2.0", "id": 9000 + i, **req})
+
+    def _stream_reason(self, n: int):
+        """先来一段推理，再来正文：验证 App 的思考块（默认折叠、点开看全文）。"""
+        sid = STATE["active_sid"]
+        STATE["streaming"] = True
+        self._broadcast({"type": "message.start", "session_id": sid, "payload": {}})
+        for i in range(n):
+            self._broadcast({"type": "reasoning.delta", "session_id": sid,
+                             "payload": {"text": f"思考第 {i} 步：先看上下文，再决定要不要读文件。\n"}})
+            time.sleep(0.25)
+        self._broadcast({"type": "reasoning.available", "session_id": sid,
+                         "payload": {"text": "".join(f"思考第 {i} 步。\n" for i in range(n))}})
+        self._broadcast({"type": "message.delta", "session_id": sid,
+                         "payload": {"text": "看完上下文了，结论是：不需要读文件。\n"}})
+        self._broadcast({"type": "message.complete", "session_id": sid,
+                         "payload": {"text": "看完上下文了，结论是：不需要读文件。"}})
+        STATE["streaming"] = False
+        log(f"reasoning stream done: {n}")
 
     def _stream_tools(self, n: int):
         """一轮里穿插 n 次工具调用，验证"工具行按顺序内联、点开能看参数/返回值"。"""

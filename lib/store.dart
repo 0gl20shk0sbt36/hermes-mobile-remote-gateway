@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'api.dart';
 import 'trace.dart';
@@ -492,6 +493,7 @@ class HermesStore extends ChangeNotifier {
       } else if (_statusKey.isEmpty && _statusRaw.isEmpty) {
         _status('يعمل...');
       }
+      unawaited(_applyReasoningFlag());
       _lastEventAt = clock();
       _idleStreak = 0;
       _busyStreak = 0;
@@ -542,6 +544,7 @@ class HermesStore extends ChangeNotifier {
       sid = '${r['session_id']}';
       storedId = r['stored_session_id'] as String?;
       _applyInfo((r['info'] as Map?)?.cast<String, dynamic>());
+      unawaited(_applyReasoningFlag());
       unawaited(refreshBackground());
     } catch (e) {
       _flash(L10n.t('تعذر إنشاء جلسة: {0}', [e]));
@@ -1225,6 +1228,10 @@ class HermesStore extends ChangeNotifier {
   /// 的 offset 以"数据库消息行"计（不是 chat item 数），所以这里单独记 `_olderOffset`。
   bool loadingOlder = false;
   bool hasMoreOlder = true;
+  /// 是否显示模型思考内容（默认关）。开启后用 `/reasoning show` 让网关**本会话**开始推送
+  /// reasoning.delta；关闭则 hide。服务端 display.show_reasoning 默认 false，所以不开就一个字节都没有。
+  bool showReasoning = false;
+  static const _reasoningKey = 'hermes.showReasoning';
   int _olderOffset = 0;
   /// 每成功插入一页"更早的消息"就 +1；UI 用它区分"头顶增长"（需要补偿）和"末尾增长"（不用管）。
   int olderEpoch = 0;
@@ -1233,6 +1240,40 @@ class HermesStore extends ChangeNotifier {
   void _noteHistoryRows(int rows) {
     _olderOffset = rows;
     hasMoreOlder = rows >= 20;
+  }
+
+  /// 读上次的选择（默认关）。
+  Future<void> restoreShowReasoning() async {
+    try {
+      final v = await const FlutterSecureStorage().read(key: _reasoningKey);
+      showReasoning = v == '1';
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  /// 切换思考内容显示。写本地偏好 + 立刻对本会话生效（不改全局 config.yaml）。
+  Future<void> setShowReasoning(bool on) async {
+    showReasoning = on;
+    notifyListeners();
+    try {
+      await const FlutterSecureStorage().write(key: _reasoningKey, value: on ? '1' : '0');
+    } catch (_) {}
+    await _applyReasoningFlag();
+  }
+
+  /// 把当前开关同步给网关（会话级）。会话还没起来时跳过，open/new 之后会再同步。
+  Future<void> _applyReasoningFlag() async {
+    final s = sid;
+    if (s == null || s.isEmpty) return;
+    try {
+      await gw.call('command.dispatch', {
+        'session_id': s,
+        'name': 'reasoning',
+        'arg': showReasoning ? 'show' : 'hide',
+      }, const Duration(seconds: 10));
+    } catch (_) {
+      // 老网关没有这个命令就静默降级：只是看不到思考内容，不影响对话。
+    }
   }
 
   Future<void> loadOlder({int page = 100}) async {

@@ -575,6 +575,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     backgroundConnection.onNetworkAvailable = () => unawaited(gw.ensureHealthy());
     backgroundConnection.listen();
+    unawaited(store.restoreShowReasoning());
     unawaited(backgroundConnection.appVersion().then((v) {
       if (mounted && v.isNotEmpty) setState(() => _appVersion = v);
     }));
@@ -970,12 +971,24 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
   @override
   void initState() {
     super.initState();
+    // 抽屉里的「显示思考过程」等开关直接读 store，需要跟着 store 变化重绘。
+    widget.store.addListener(_onStore);
     () async {
       try {
         final act = await Connections.instance.active();
         if (mounted) setState(() => _connName = act?.name);
       } catch (_) {}
     }();
+  }
+
+  void _onStore() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    widget.store.removeListener(_onStore);
+    super.dispose();
   }
 
   @override
@@ -1211,6 +1224,9 @@ class _SessionsDrawerState extends State<SessionsDrawer> {
             if (widget.onConnections != null)
               footerBtn(tb.Server2.new, L10n.t('البوابات والاتصال'), widget.onConnections!, value: _connName),
             if (widget.onBackground != null) footerBtn(tb.Bolt.new, L10n.t('الاتصال في الخلفية'), widget.onBackground!),
+            footerBtn(tb.Brain.new, L10n.t('إظهار التفكير'),
+                () => store.setShowReasoning(!store.showReasoning),
+                value: store.showReasoning ? L10n.t('مُفعّل') : L10n.t('مُعطّل')),
             footerBtn(tb.Language.new, L10n.t('اللغة'), () => pickLanguage(context), value: L10n.names[L10n.lang]),
             if (widget.version.isNotEmpty)
               Padding(
