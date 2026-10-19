@@ -301,13 +301,30 @@ class HermesStore extends ChangeNotifier {
 
   bool get connected => gw.state == LinkState.connected;
 
+  /// App 在后台时停止轮询：常驻服务只保连接，UI 侧不再定时打 RPC。
+  /// （公网/蜂窝下这是最大的一块无谓流量：原来 active_list 4s 一次 + 背景面板 6s 一次，全是常开。）
+  bool paused = false;
+  int _activeTick = 0;
+  /// 背景面板是否打开：只有打开时才轮询 process/subagent 列表。
+  bool watchBackground = false;
+
   void _onLink() {
     if (gw.state == LinkState.connected) {
       refreshSessions();
       refreshActive();
-      _activeTimer ??= Timer.periodic(const Duration(seconds: 4), (_) => refreshActive());
+      _activeTimer ??= Timer.periodic(const Duration(seconds: 4), (_) {
+        if (paused) return;
+        // 空闲时降到 12s（每 3 拍一次）；有任务在跑/正在打开时才 4s。
+        _activeTick++;
+        final busy = running || opening || submitting;
+        if (!busy && _activeTick % 3 != 0) return;
+        unawaited(refreshActive());
+      });
       _bgTimer ??= Timer.periodic(const Duration(seconds: 6), (_) {
-        if (sid != null && !opening) unawaited(refreshBackground());
+        if (paused || sid == null || opening) return;
+        // 只有面板开着或确实有任务在跑时才拉进程/子代理列表。
+        if (!watchBackground && !running && background.isEmpty) return;
+        unawaited(refreshBackground());
       });
       if (commands.isEmpty) loadCatalog();
     }
@@ -1342,7 +1359,7 @@ class HermesStore extends ChangeNotifier {
     if (_lastForeignSync != null && now.difference(_lastForeignSync!) < const Duration(seconds: 2)) return;
     _lastForeignSync = now;
     try {
-      final rows = await api.sessionMessages(id, limit: 20);
+      final rows = await api.sessionMessages(id, limit: 8);
       final text = lastUserText(rows);
       if (text == null || text.isEmpty) return;
       if (!needsForeignUser(items, text)) return;

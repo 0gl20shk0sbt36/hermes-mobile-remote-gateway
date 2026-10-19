@@ -12,7 +12,7 @@ class FakeApi extends HermesApi {
 
   @override
   Future<List<Map<String, dynamic>>> sessionMessages(String storedId,
-      {int limit = 300, int offset = 0}) async {
+      {int limit = 300, int offset = 0, bool includeReasoning = false}) async {
     fetches++;
     if (fail) throw 'no route';
     final all = transcripts[storedId] ?? [];

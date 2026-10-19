@@ -612,7 +612,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      store.paused = false;
       unawaited(gw.ensureHealthy());
+      unawaited(store.refreshActive());
+      return;
+    }
+    // 切到后台：停掉 UI 侧轮询（常驻服务只保连接，不再定时打 RPC，省流量/电量）。
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      store.paused = true;
     }
   }
 

@@ -161,7 +161,7 @@ class HermesApi {
   /// full history serialises every message of the whole compression lineage
   /// (megabytes on a long session) and blocks the switch for seconds.
   Future<List<Map<String, dynamic>>> sessionMessages(String storedId,
-      {int limit = 300, int offset = 0}) async {
+      {int limit = 120, int offset = 0, bool includeReasoning = false}) async {
     Future<http.Response> get() => http
         .get(
             Uri.parse('$baseUrl/api/sessions/${Uri.encodeComponent(storedId)}/messages')
@@ -169,6 +169,9 @@ class HermesApi {
                   'limit': '$limit',
                   'offset': '$offset',
                   'order': 'latest',
+                  // 手机端不渲染历史推理；且 reasoning/reasoning_content 是同一段文本存两列，
+                  // 300 行历史约 610 KB，剥离后 381 KB。服务端老版本会忽略未知参数。
+                  'include_reasoning': includeReasoning ? 'true' : 'false',
                 }),
             headers: _headers)
         .timeout(const Duration(seconds: 30));
